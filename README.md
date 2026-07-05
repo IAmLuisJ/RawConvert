@@ -33,7 +33,7 @@ python3 rawconvert.py doctor
 |---|---|---|
 | `doctor` | Check which external tools are installed, with install links | |
 | `scan FOLDER` | Inventory RAW files: counts, sizes, estimated savings | `--no-recurse` |
-| `compare RAWFILE` | Convert **one** file to every available format and open the results in Preview | `--quality`, `--render` |
+| `compare RAWFILE` | Convert **one** file to every available format — JPEG via *both* engines (camera-embedded and sips re-render) — and open the results in Preview | `--quality` |
 | `convert FOLDER --to FMT` | Convert all RAW files (idempotent — re-run to resume) | `--sample N`, `--quality`, `--render`, `--output DIR`, `--no-recurse`, `--dry-run` |
 | `verify FOLDER --to FMT` | Validate outputs: existence, readability, pixel dimensions | |
 | `status FOLDER` | Per-format size comparison table from the manifest | |
@@ -50,7 +50,9 @@ sidecars macOS scatters on FAT/exFAT drives).
 python3 rawconvert.py scan /Volumes/MyDrive/Photos
 
 # 2. Pick one representative photo and compare all formats side by side —
-#    converts it to every available format and opens the results in Preview
+#    converts it to every available format (JPEG via both engines: the
+#    camera's embedded JPEG and a sips re-render at --quality) and opens
+#    everything in Preview
 python3 rawconvert.py compare /Volumes/MyDrive/Photos/2023/IMG_0421.CR3
 
 # (optional) trial a larger sample per format and compare aggregate sizes
