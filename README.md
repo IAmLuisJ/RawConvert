@@ -27,6 +27,22 @@ Check what you have:
 python3 rawconvert.py doctor
 ```
 
+## Commands
+
+| Command | What it does | Key options |
+|---|---|---|
+| `doctor` | Check which external tools are installed, with install links | |
+| `scan FOLDER` | Inventory RAW files: counts, sizes, estimated savings | `--no-recurse` |
+| `compare RAWFILE` | Convert **one** file to every available format and open the results in Preview | `--quality` |
+| `convert FOLDER --to FMT` | Convert all RAW files (idempotent — re-run to resume) | `--sample N`, `--quality`, `--output DIR`, `--no-recurse`, `--dry-run` |
+| `verify FOLDER --to FMT` | Validate outputs: existence, readability, pixel dimensions | |
+| `status FOLDER` | Per-format size comparison table from the manifest | |
+| `cleanup FOLDER --keep FMT` | Stage verified originals + rejected-format outputs for manual deletion | `--dry-run` |
+
+`FMT` is `jpeg`, `heic`, or `dng`. All folder commands recurse into
+subfolders by default and skip hidden files (including the `._*` metadata
+sidecars macOS scatters on FAT/exFAT drives).
+
 ## Workflow
 
 ```sh
@@ -56,11 +72,9 @@ python3 rawconvert.py cleanup /Volumes/MyDrive/Photos --keep heic
 #    /Volumes/MyDrive/Photos/_rawconvert_trash/
 ```
 
-Add `--dry-run` to `convert` or `cleanup` to preview without changing anything.
-
-`scan` and `convert` recurse into subfolders by default; add `--no-recurse`
-to limit a run to the top level of the given folder (handy for trialing one
-folder without touching what's inside it).
+Add `--dry-run` to `convert` or `cleanup` to preview without changing
+anything, and `--no-recurse` to `scan` or `convert` to limit a run to the top
+level of a folder.
 
 ### Writing outputs to a different drive
 
@@ -101,8 +115,9 @@ investigate.
 
 ## Safety model
 
-- Outputs are written next to their RAW (`IMG_0001.CR3` → `IMG_0001.heic`)
-  via a `.partial` temp name — interruptions never leave corrupt outputs.
+- Outputs are written next to their RAW (`IMG_0001.CR3` → `IMG_0001.heic`),
+  or mirrored under `--output DIR`, via a `.partial` temp name —
+  interruptions never leave corrupt outputs.
 - State lives in `_rawconvert_manifest.csv` in the target folder; re-running
   `convert` skips finished files, so a mid-batch drive disconnect is harmless.
 - Existing files the tool didn't create are **never overwritten** (reported
@@ -110,6 +125,15 @@ investigate.
 - `cleanup` only touches originals whose output passed `verify`, and it only
   *moves* them into `_rawconvert_trash/` on the same drive. Deleting that
   folder is always a manual, human step.
+
+## Files the tool creates
+
+| File | Where | Purpose |
+|---|---|---|
+| `_rawconvert_manifest.csv` | scanned folder | Per-file conversion state (drives resume, `verify`, `status`, `cleanup`) |
+| `_rawconvert_errors.log` | scanned folder | Classified failures with diagnosis and debug steps |
+| `_rawconvert_trash/` | scanned folder (and output drive, for rejected formats) | Staging area for `cleanup` — emptied only by you |
+| `rawconvert_compare_*/` | system temp folder | Throwaway outputs from `compare` |
 
 ## Notes
 
