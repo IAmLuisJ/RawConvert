@@ -56,6 +56,10 @@ python3 rawconvert.py cleanup /Volumes/MyDrive/Photos --keep heic
 
 Add `--dry-run` to `convert` or `cleanup` to preview without changing anything.
 
+`scan` and `convert` recurse into subfolders by default; add `--no-recurse`
+to limit a run to the top level of the given folder (handy for trialing one
+folder without touching what's inside it).
+
 ### Writing outputs to a different drive
 
 By default outputs sit next to their RAW files. Use `--output DIR` to mirror
