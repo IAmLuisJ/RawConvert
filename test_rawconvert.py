@@ -284,6 +284,102 @@ class TestVerify(TempDirTestCase):
         self.assertEqual(counts["failed"], 1)
 
 
+class TestConvertToOutputFolder(ConvertTestCase):
+    def setUp(self):
+        super().setUp()
+        self.out_tmp = tempfile.TemporaryDirectory()
+        self.out_root = Path(self.out_tmp.name)
+        self.addCleanup(self.out_tmp.cleanup)
+
+    def test_mirrors_structure_into_output_root(self):
+        self.make_raws("a.CR2", "sub/deep/b.cr3")
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "jpeg",
+                            output_root=self.out_root)
+        self.assertEqual(counts["converted"], 2)
+        self.assertTrue((self.out_root / "a.jpg").exists())
+        self.assertTrue((self.out_root / "sub/deep/b.jpg").exists())
+        # nothing written next to the sources
+        self.assertFalse((self.root / "a.jpg").exists())
+        row = self.manifest().get("a.CR2", "jpeg")
+        self.assertEqual(row["output_root"], str(self.out_root.resolve()))
+        self.assertEqual(row["output_relpath"], "a.jpg")
+
+    def test_rerun_with_same_output_skips(self):
+        self.make_raws("a.CR2")
+        capture(rawconvert.cmd_convert, self.root, "heic",
+                output_root=self.out_root)
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "heic",
+                            output_root=self.out_root)
+        self.assertEqual(counts["skipped"], 1)
+        self.assertEqual(counts["converted"], 0)
+
+    def test_collision_in_output_root_not_overwritten(self):
+        self.make_raws("a.CR2")
+        (self.out_root / "a.jpg").write_bytes(b"PRECIOUS")
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "jpeg",
+                            output_root=self.out_root)
+        self.assertEqual(counts["collision"], 1)
+        self.assertEqual((self.out_root / "a.jpg").read_bytes(), b"PRECIOUS")
+
+    def test_dry_run_creates_no_output_dirs(self):
+        self.make_raws("sub/a.CR2")
+        capture(rawconvert.cmd_convert, self.root, "jpeg",
+                output_root=self.out_root, dry_run=True)
+        self.assertFalse((self.out_root / "sub").exists())
+
+    def test_verify_uses_recorded_output_root(self):
+        self.make_raws("a.CR2")
+        capture(rawconvert.cmd_convert, self.root, "jpeg",
+                output_root=self.out_root)
+
+        def fake_dims(path):
+            return (6000, 4000)
+        with mock.patch.object(rawconvert, "image_dimensions",
+                               side_effect=fake_dims):
+            counts, _ = capture(rawconvert.cmd_verify, self.root, "jpeg")
+        self.assertEqual(counts["verified"], 1)
+
+    def test_cleanup_stages_rejected_output_on_its_own_drive(self):
+        self.make_raws("a.CR2")
+        capture(rawconvert.cmd_convert, self.root, "jpeg",
+                output_root=self.out_root)   # will be the rejected format
+        capture(rawconvert.cmd_convert, self.root, "heic")  # kept, in-place
+        m = rawconvert.Manifest(self.root)
+        m.load()
+        m.set("a.CR2", "heic", status="verified")
+        m.save()
+
+        counts, _ = capture(rawconvert.cmd_cleanup, self.root, "heic")
+        # original staged in the source root's trash
+        self.assertTrue((self.root / rawconvert.TRASH_DIRNAME /
+                         "originals" / "a.CR2").exists())
+        # rejected jpeg staged in a trash on the OUTPUT root, not the source
+        self.assertFalse((self.out_root / "a.jpg").exists())
+        self.assertTrue((self.out_root / rawconvert.TRASH_DIRNAME /
+                         "rejected" / "a.jpg").exists())
+        self.assertEqual(counts["originals_staged"], 1)
+        self.assertEqual(counts["rejected_staged"], 1)
+
+
+class TestManifestBackwardCompat(TempDirTestCase):
+    def test_loads_manifest_written_without_output_root_column(self):
+        old_fields = [f for f in rawconvert.MANIFEST_FIELDS
+                      if f != "output_root"]
+        import csv
+        with open(self.root / rawconvert.MANIFEST_NAME, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=old_fields)
+            w.writeheader()
+            w.writerow({"source_relpath": "a.CR2", "format": "jpeg",
+                        "output_relpath": "a.jpg", "src_bytes": "10",
+                        "out_bytes": "3", "engine": "sips",
+                        "status": "converted", "timestamp": "t", "note": ""})
+        m = rawconvert.Manifest(self.root)
+        m.load()
+        row = m.get("a.CR2", "jpeg")
+        self.assertEqual(row["output_root"], "")
+        m.save()  # must not raise
+
+
 class TestStatus(TempDirTestCase):
     def test_status_reports_per_format_sizes(self):
         m = rawconvert.Manifest(self.root)
