@@ -97,7 +97,7 @@ class TestScan(TempDirTestCase):
         (self.root / "ignore.jpg").write_bytes(b"x" * 500)
         _, out = capture(rawconvert.cmd_scan, self.root)
         self.assertIn("2 RAW files", out)
-        self.assertIn("4.0 KB", out)
+        self.assertIn("3.9 KB", out)  # 4000 bytes / 1024
 
 
 if __name__ == "__main__":
