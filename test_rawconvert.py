@@ -284,5 +284,80 @@ class TestVerify(TempDirTestCase):
         self.assertEqual(counts["failed"], 1)
 
 
+class TestStatus(TempDirTestCase):
+    def test_status_reports_per_format_sizes(self):
+        m = rawconvert.Manifest(self.root)
+        m.set("a.CR2", "jpeg", output_relpath="a.jpg", status="verified",
+              src_bytes=1000, out_bytes=250, engine="sips")
+        m.set("b.CR2", "jpeg", output_relpath="b.jpg", status="converted",
+              src_bytes=1000, out_bytes=350, engine="sips")
+        m.set("a.CR2", "heic", output_relpath="a.heic", status="converted",
+              src_bytes=1000, out_bytes=100, engine="sips")
+        m.save()
+        _, out = capture(rawconvert.cmd_status, self.root)
+        self.assertIn("jpeg", out)
+        self.assertIn("heic", out)
+        self.assertIn("30%", out)   # jpeg: 600/2000
+        self.assertIn("10%", out)   # heic: 100/1000
+        self.assertIn("1 verified", out)
+
+
+class TestCleanup(TempDirTestCase):
+    def seed_tree(self):
+        """a: verified jpeg + converted heic; b: converted-only jpeg."""
+        for rel in ("a.CR2", "a.jpg", "a.heic", "b.CR2", "b.jpg"):
+            (self.root / rel).write_bytes(b"DATA-" + rel.encode())
+        m = rawconvert.Manifest(self.root)
+        m.set("a.CR2", "jpeg", output_relpath="a.jpg", status="verified",
+              src_bytes=10, out_bytes=3, engine="sips")
+        m.set("a.CR2", "heic", output_relpath="a.heic", status="converted",
+              src_bytes=10, out_bytes=2, engine="sips")
+        m.set("b.CR2", "jpeg", output_relpath="b.jpg", status="converted",
+              src_bytes=10, out_bytes=3, engine="sips")
+        m.save()
+
+    def trash(self, *parts):
+        return self.root.joinpath(rawconvert.TRASH_DIRNAME, *parts)
+
+    def test_cleanup_moves_verified_originals_and_rejected_outputs(self):
+        self.seed_tree()
+        counts, _ = capture(rawconvert.cmd_cleanup, self.root, "jpeg")
+        # a.CR2 verified as jpeg -> original staged
+        self.assertFalse((self.root / "a.CR2").exists())
+        self.assertTrue(self.trash("originals", "a.CR2").exists())
+        # a.heic is a rejected-format output -> staged
+        self.assertFalse((self.root / "a.heic").exists())
+        self.assertTrue(self.trash("rejected", "a.heic").exists())
+        # kept-format output stays
+        self.assertTrue((self.root / "a.jpg").exists())
+        # b.CR2 only 'converted', not verified -> untouched
+        self.assertTrue((self.root / "b.CR2").exists())
+        self.assertTrue((self.root / "b.jpg").exists())
+        self.assertEqual(counts["originals_staged"], 1)
+        self.assertEqual(counts["rejected_staged"], 1)
+        m = rawconvert.Manifest(self.root)
+        m.load()
+        self.assertEqual(m.get("a.CR2", "jpeg")["status"], "cleaned")
+        self.assertEqual(m.get("a.CR2", "heic")["status"], "cleaned")
+        self.assertEqual(m.get("b.CR2", "jpeg")["status"], "converted")
+
+    def test_cleanup_dry_run_changes_nothing(self):
+        self.seed_tree()
+        counts, out = capture(rawconvert.cmd_cleanup, self.root, "jpeg",
+                              dry_run=True)
+        self.assertIn("a.CR2", out)
+        self.assertTrue((self.root / "a.CR2").exists())
+        self.assertTrue((self.root / "a.heic").exists())
+        self.assertFalse(self.trash().exists())
+        self.assertEqual(counts["originals_staged"], 1)
+
+    def test_cleanup_is_idempotent(self):
+        self.seed_tree()
+        capture(rawconvert.cmd_cleanup, self.root, "jpeg")
+        counts, _ = capture(rawconvert.cmd_cleanup, self.root, "jpeg")
+        self.assertEqual(counts["originals_staged"], 0)
+        self.assertEqual(counts["rejected_staged"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -425,3 +425,83 @@ def cmd_verify(root: Path, fmt: str) -> dict:
         print("Failed files stay protected: cleanup will not touch their"
               " originals.")
     return counts
+
+
+def cmd_status(root: Path) -> int:
+    """Per-format size comparison table from the manifest."""
+    manifest = Manifest(root)
+    manifest.load()
+    stats = {}  # fmt -> [files, verified, src_bytes, out_bytes]
+    for row in manifest.rows():
+        if row["status"] not in ("converted", "verified", "cleaned"):
+            continue
+        entry = stats.setdefault(row["format"], [0, 0, 0, 0])
+        entry[0] += 1
+        if row["status"] in ("verified", "cleaned"):
+            entry[1] += 1
+        entry[2] += int(row["src_bytes"] or 0)
+        entry[3] += int(row["out_bytes"] or 0)
+    if not stats:
+        print("No conversions recorded yet under %s" % root)
+        return 0
+    print("%-6s %10s %12s %12s %8s %10s" %
+          ("format", "files", "raw size", "out size", "ratio", "saved"))
+    for fmt in sorted(stats):
+        files, verified, src_b, out_b = stats[fmt]
+        ratio = (100.0 * out_b / src_b) if src_b else 0.0
+        print("%-6s %10d %12s %12s %7.0f%% %10s   (%d verified)" %
+              (fmt, files, human_size(src_b), human_size(out_b), ratio,
+               human_size(src_b - out_b), verified))
+    print("\nratio = output size as %% of RAW size (lower saves more space).")
+    print("Open a few outputs in Preview to judge quality before cleanup.")
+    return 0
+
+
+def _stage(path: Path, dest: Path, dry_run: bool) -> None:
+    if dry_run:
+        print("DRY-RUN: would move %s -> %s" % (path, dest))
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(str(path), str(dest))
+
+
+def cmd_cleanup(root: Path, keep: str, dry_run: bool = False) -> dict:
+    """Stage verified originals + rejected-format outputs into the trash dir.
+
+    Only sources whose `keep`-format output is VERIFIED are staged. Nothing is
+    deleted; the user reviews _rawconvert_trash/ and empties it manually.
+    """
+    manifest = Manifest(root)
+    manifest.load()
+    trash = root / TRASH_DIRNAME
+    counts = {"originals_staged": 0, "rejected_staged": 0}
+
+    for row in manifest.rows():
+        rel = row["source_relpath"]
+        if row["format"] == keep and row["status"] == "verified":
+            src = root / rel
+            if src.exists():
+                _stage(src, trash / "originals" / rel, dry_run)
+                counts["originals_staged"] += 1
+                if not dry_run:
+                    manifest.set(rel, keep, status="cleaned")
+        elif (row["format"] != keep
+              and row["status"] in ("converted", "verified")):
+            out = root / row["output_relpath"]
+            if out.exists():
+                _stage(out, trash / "rejected" / row["output_relpath"],
+                       dry_run)
+                counts["rejected_staged"] += 1
+                if not dry_run:
+                    manifest.set(rel, row["format"], status="cleaned")
+
+    if not dry_run:
+        manifest.save()
+    print("cleanup --keep %s: %d originals and %d rejected outputs staged"
+          " in %s%s" % (keep, counts["originals_staged"],
+                        counts["rejected_staged"], trash,
+                        " (dry run)" if dry_run else ""))
+    if not dry_run and (counts["originals_staged"]
+                        or counts["rejected_staged"]):
+        print("Review that folder, then delete it yourself when satisfied.")
+    return counts
