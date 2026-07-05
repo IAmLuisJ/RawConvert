@@ -10,6 +10,7 @@ Adobe DNG Converter (optional).
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import datetime
 import os
@@ -505,3 +506,93 @@ def cmd_cleanup(root: Path, keep: str, dry_run: bool = False) -> dict:
                         or counts["rejected_staged"]):
         print("Review that folder, then delete it yourself when satisfied.")
     return counts
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _folder(text: str) -> Path:
+    path = Path(text).expanduser().resolve()
+    if not path.is_dir():
+        raise argparse.ArgumentTypeError("not a folder: %s" % text)
+    return path
+
+
+def _require_engine(fmt: str) -> None:
+    if not have_sips():
+        sys.exit("sips not found — this tool requires macOS.")
+    if fmt == "dng" and dng_converter() is None:
+        sys.exit("Converting to DNG requires Adobe DNG Converter.\n"
+                 "Free download: %s\nRun `rawconvert.py doctor` to re-check."
+                 % DNG_CONVERTER_URL)
+    if fmt == "jpeg" and not have_exiftool():
+        print("Note: exiftool not found — JPEGs will be re-rendered by sips"
+              " instead of using the camera's embedded JPEG, and metadata"
+              " copying is limited. Install from %s (see: doctor)."
+              % EXIFTOOL_URL)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="rawconvert.py",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("doctor", help="check required external tools")
+
+    p = sub.add_parser("scan", help="inventory RAW files and estimate savings")
+    p.add_argument("folder", type=_folder)
+
+    p = sub.add_parser("convert", help="convert RAW files (idempotent)")
+    p.add_argument("folder", type=_folder)
+    p.add_argument("--to", required=True, choices=sorted(FORMATS),
+                   dest="fmt", help="output format")
+    p.add_argument("--quality", type=int, default=90,
+                   help="JPEG/HEIC quality 1-100 (default 90)")
+    p.add_argument("--sample", type=int, metavar="N",
+                   help="convert only the first N files (for format trials)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="show what would happen without writing anything")
+
+    p = sub.add_parser("verify", help="validate converted outputs")
+    p.add_argument("folder", type=_folder)
+    p.add_argument("--to", required=True, choices=sorted(FORMATS), dest="fmt")
+
+    p = sub.add_parser("status", help="per-format size comparison")
+    p.add_argument("folder", type=_folder)
+
+    p = sub.add_parser(
+        "cleanup",
+        help="stage verified originals (and rejected-format outputs) into"
+             " %s/ for manual deletion" % TRASH_DIRNAME)
+    p.add_argument("folder", type=_folder)
+    p.add_argument("--keep", required=True, choices=sorted(FORMATS),
+                   help="the format you decided to keep")
+    p.add_argument("--dry-run", action="store_true")
+
+    args = parser.parse_args(argv)
+
+    if args.command == "doctor":
+        return cmd_doctor()
+    if args.command == "scan":
+        return cmd_scan(args.folder)
+    if args.command == "convert":
+        _require_engine(args.fmt)
+        counts = cmd_convert(args.folder, args.fmt, quality=args.quality,
+                             sample=args.sample, dry_run=args.dry_run)
+        return 1 if counts["failed"] else 0
+    if args.command == "verify":
+        counts = cmd_verify(args.folder, args.fmt)
+        return 1 if counts["failed"] else 0
+    if args.command == "status":
+        return cmd_status(args.folder)
+    if args.command == "cleanup":
+        cmd_cleanup(args.folder, args.keep, dry_run=args.dry_run)
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
