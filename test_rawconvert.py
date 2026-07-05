@@ -35,6 +35,15 @@ class TestDiscovery(TempDirTestCase):
                 for p in rawconvert.find_raw_files(self.root)]
         self.assertEqual(rels, ["a.CR2", "sub/b.cr3"])
 
+    def test_skips_hidden_and_appledouble_files(self):
+        # macOS writes ._* AppleDouble sidecars on FAT/exFAT drives; they have
+        # a .CR3 extension but are metadata, not photos
+        for rel in ["._a.CR3", ".hidden.CR2", "real.CR3"]:
+            (self.root / rel).write_bytes(b"x")
+        rels = [str(p.relative_to(self.root))
+                for p in rawconvert.find_raw_files(self.root)]
+        self.assertEqual(rels, ["real.CR3"])
+
     def test_no_recurse_finds_only_top_level(self):
         (self.root / "sub").mkdir()
         (self.root / "a.CR2").write_bytes(b"x")
@@ -298,6 +307,75 @@ class TestVerify(TempDirTestCase):
         counts, _ = self.run_verify("dng", {"a.CR2": (6000, 4000),
                                             "a.dng": None})
         self.assertEqual(counts["failed"], 1)
+
+
+class TestFailureClassification(unittest.TestCase):
+    def test_appledouble_classified(self):
+        info = rawconvert.classify_failure(
+            Path("._a.CR3"), 4096, "sips failed: Cannot extract image")
+        self.assertEqual(info["code"], "RC01")
+
+    def test_tiny_file_classified_as_not_raw(self):
+        info = rawconvert.classify_failure(
+            Path("a.CR3"), 900, "sips failed: Cannot extract image")
+        self.assertEqual(info["code"], "RC02")
+
+    def test_unsupported_or_corrupt(self):
+        info = rawconvert.classify_failure(
+            Path("a.CR3"), 25 * 1024 * 1024,
+            "sips failed: Error: Cannot extract image from file.")
+        self.assertEqual(info["code"], "RC03")
+        self.assertTrue(info["steps"])
+
+    def test_disk_full(self):
+        info = rawconvert.classify_failure(
+            Path("a.CR3"), 25 * 1024 * 1024, "No space left on device")
+        self.assertEqual(info["code"], "RC05")
+
+    def test_permission_denied(self):
+        info = rawconvert.classify_failure(
+            Path("a.CR3"), 25 * 1024 * 1024, "Permission denied")
+        self.assertEqual(info["code"], "RC06")
+
+    def test_unknown_fallback(self):
+        info = rawconvert.classify_failure(
+            Path("a.CR3"), 25 * 1024 * 1024, "something inexplicable")
+        self.assertEqual(info["code"], "RC99")
+
+
+class TestErrorLog(ConvertTestCase):
+    def test_failed_conversion_writes_error_log_with_debug_steps(self):
+        self.make_raws("a.CR2", "b.CR2")
+        # big enough to pass the too-small (RC02) gate and hit RC03
+        (self.root / "a.CR2").write_bytes(
+            b"\0" * (rawconvert.MIN_PLAUSIBLE_RAW_BYTES + 1))
+
+        def explode_on_a(src, dst, *args, **kwargs):
+            if Path(src).name == "a.CR2":
+                raise rawconvert.EngineError(
+                    "sips failed: Error: Cannot extract image from file.")
+            fake_engine_write(src, dst)
+
+        self.sips_convert.side_effect = explode_on_a
+        counts, out = capture(rawconvert.cmd_convert, self.root, "heic")
+        self.assertEqual(counts["failed"], 1)
+
+        log = self.root / rawconvert.ERROR_LOG_NAME
+        self.assertTrue(log.exists())
+        text = log.read_text()
+        self.assertIn("RC03", text)
+        self.assertIn("a.CR2", text)
+        self.assertIn("debug steps", text.lower())
+        self.assertIn("Cannot extract image", text)
+        # manifest note carries the code; console points at the log
+        self.assertIn("[RC03]",
+                      self.manifest().get("a.CR2", "heic")["note"])
+        self.assertIn(rawconvert.ERROR_LOG_NAME, out)
+
+    def test_no_error_log_when_nothing_fails(self):
+        self.make_raws("a.CR2")
+        capture(rawconvert.cmd_convert, self.root, "heic")
+        self.assertFalse((self.root / rawconvert.ERROR_LOG_NAME).exists())
 
 
 class TestConvertToOutputFolder(ConvertTestCase):

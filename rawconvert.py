@@ -23,6 +23,7 @@ RAW_EXTS = {".cr2", ".cr3"}
 FORMATS = {"jpeg": ".jpg", "heic": ".heic", "dng": ".dng"}
 TRASH_DIRNAME = "_rawconvert_trash"
 MANIFEST_NAME = "_rawconvert_manifest.csv"
+ERROR_LOG_NAME = "_rawconvert_errors.log"
 MANIFEST_FIELDS = [
     "source_relpath", "format", "output_relpath", "output_root", "src_bytes",
     "out_bytes", "engine", "status", "timestamp", "note",
@@ -46,6 +47,10 @@ def find_raw_files(root: Path, recurse: bool = True) -> list:
         if not path.is_file():
             continue
         if path.suffix.lower() not in RAW_EXTS:
+            continue
+        if path.name.startswith("."):
+            # hidden files, esp. "._*" AppleDouble metadata sidecars that
+            # macOS writes on FAT/exFAT drives — not real photos
             continue
         if TRASH_DIRNAME in path.relative_to(root).parts:
             continue
@@ -292,6 +297,111 @@ def resolve_output(root: Path, row: dict):
     return base / row["output_relpath"]
 
 
+# ---------------------------------------------------------------------------
+# Failure classification and error log
+# ---------------------------------------------------------------------------
+
+MIN_PLAUSIBLE_RAW_BYTES = 1024 * 1024  # real CR2/CR3 files are many MB
+
+FAILURE_CODES = {
+    "RC01": ("HIDDEN_METADATA_FILE",
+             "This is a macOS metadata sidecar (AppleDouble '._*' file)"
+             " created on FAT/exFAT drives, not a real photo.",
+             ["Nothing to fix — it contains Finder metadata, no image.",
+              "rawconvert now skips these automatically; re-run convert.",
+              "To stop macOS creating them: `dot_clean /Volumes/<drive>`."]),
+    "RC02": ("NOT_A_VALID_RAW",
+             "The file is far too small to be a real CR2/CR3 photo"
+             " (under 1 MB); it is likely truncated or a stray file.",
+             ["Check its size in Finder — a real RAW is typically 20-40 MB.",
+              "If this photo matters, restore it from another copy/card.",
+              "Otherwise it is safe to leave; cleanup will never touch it."]),
+    "RC03": ("UNSUPPORTED_OR_CORRUPT",
+             "macOS could not decode this RAW — either the file is corrupt"
+             " or this camera's RAW flavor isn't supported by this macOS"
+             " version.",
+             ["Open the file in Preview or press Space in Finder — does it"
+              " render? If not, the file is likely corrupt.",
+              "Run `exiftool <file>` — if exiftool also can't read it,"
+              " corruption is almost certain.",
+              "If it renders fine elsewhere, check Apple's supported-camera"
+              " list (search 'Apple ProRAW supported cameras sips') or"
+              " update macOS.",
+              "For --to jpeg with exiftool installed, the embedded JPEG"
+              " may still extract even when sips can't decode the RAW."]),
+    "RC04": ("ENGINE_MISSING",
+             "The external tool needed for this format is not installed.",
+             ["Run `python3 rawconvert.py doctor` and follow the install"
+              " links."]),
+    "RC05": ("DISK_FULL",
+             "The destination drive has no space left.",
+             ["Free space on the output drive, or point --output at a"
+              " different drive.",
+              "Re-run the same convert command — finished files are"
+              " skipped automatically."]),
+    "RC06": ("PERMISSION_DENIED",
+             "macOS blocked access to the file or destination folder.",
+             ["Check System Settings > Privacy & Security > Files and"
+              " Folders (or Full Disk Access) for your terminal app.",
+              "Check the drive isn't mounted read-only: `mount | grep"
+              " Volumes`."]),
+    "RC99": ("UNKNOWN",
+             "Unrecognized failure — the raw engine output is preserved"
+             " below.",
+             ["Read the engine error text above.",
+              "Try converting the single file manually, e.g. `sips -s"
+              " format jpeg <file> --out /tmp/test.jpg`, to reproduce.",
+              "If several files fail the same way, re-run with --sample on"
+              " a copy and report the log."]),
+}
+
+
+def classify_failure(src: Path, src_bytes: int, message: str) -> dict:
+    """Map a failed conversion to an error code with debug steps."""
+    text = message.lower()
+    if src.name.startswith("._"):
+        code = "RC01"
+    elif src_bytes < MIN_PLAUSIBLE_RAW_BYTES:
+        code = "RC02"
+    elif "not installed" in text:
+        code = "RC04"
+    elif "no space left" in text or "disk full" in text:
+        code = "RC05"
+    elif "permission denied" in text or "read-only" in text:
+        code = "RC06"
+    elif "cannot extract image" in text or "unable to decode" in text:
+        code = "RC03"
+    else:
+        code = "RC99"
+    name, diagnosis, steps = FAILURE_CODES[code]
+    return {"code": code, "name": name, "diagnosis": diagnosis,
+            "steps": steps}
+
+
+def log_failure(root: Path, rel: str, src: Path, fmt: str, engine: str,
+                message: str) -> dict:
+    """Append a classified failure to the error log; returns the class info."""
+    try:
+        src_bytes = src.stat().st_size
+    except OSError:
+        src_bytes = 0
+    info = classify_failure(src, src_bytes, message)
+    timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+    lines = [
+        "[%s] %s %s" % (timestamp, info["code"], info["name"]),
+        "  file: %s (%s)" % (rel, human_size(src_bytes)),
+        "  operation: convert --to %s (engine: %s)" % (fmt, engine or "n/a"),
+        "  engine error: %s" % message.replace("\n", "\n      "),
+        "  diagnosis: %s" % info["diagnosis"],
+        "  debug steps:",
+    ]
+    lines += ["    %d. %s" % (i, step)
+              for i, step in enumerate(info["steps"], 1)]
+    with open(root / ERROR_LOG_NAME, "a") as f:
+        f.write("\n".join(lines) + "\n\n")
+    return info
+
+
 def _root_field(out_base: Path, root: Path) -> str:
     """Manifest output_root value: empty for in-place outputs."""
     return "" if out_base == root else str(out_base)
@@ -371,12 +481,16 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
         except EngineError as exc:
             if partial.exists():
                 partial.unlink()
+            info = log_failure(root, rel, src, fmt, engine, str(exc))
             manifest.set(rel, fmt, output_relpath=out_rel,
                          output_root=_root_field(out_base, root),
-                         engine=engine,
-                         status="failed", note=str(exc)[:300])
+                         engine=engine, status="failed",
+                         note=("[%s] %s: %s"
+                               % (info["code"], info["name"],
+                                  str(exc)))[:300])
             counts["failed"] += 1
-            print("FAILED: %s: %s" % (rel, exc))
+            print("FAILED [%s %s]: %s — %s"
+                  % (info["code"], info["name"], rel, info["diagnosis"]))
         pending += 1
         if pending >= MANIFEST_FLUSH_EVERY:
             manifest.save()
@@ -388,6 +502,9 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
           " %d collisions%s" %
           (fmt, counts["converted"], counts["skipped"], counts["failed"],
            counts["collision"], " (dry run)" if dry_run else ""))
+    if counts["failed"]:
+        print("Failure details and debug steps: %s"
+              % (root / ERROR_LOG_NAME))
     return counts
 
 
