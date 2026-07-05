@@ -355,3 +355,73 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
           (fmt, counts["converted"], counts["skipped"], counts["failed"],
            counts["collision"], " (dry run)" if dry_run else ""))
     return counts
+
+
+def _dims_match(src_dims, dst_dims) -> bool:
+    """True if dimensions match within tolerance, allowing 90° rotation.
+
+    Canon sensor dimensions reported for the RAW can differ from the rendered
+    image by a few dozen pixels, so allow 2% (min 16 px) per axis.
+    """
+    def close(a, b):
+        return abs(a - b) <= max(16, 0.02 * max(a, b))
+
+    for cand in (dst_dims, (dst_dims[1], dst_dims[0])):
+        if close(src_dims[0], cand[0]) and close(src_dims[1], cand[1]):
+            return True
+    return False
+
+
+TIFF_MAGICS = (b"II*\x00", b"MM\x00*")
+
+
+def _check_output(src: Path, dst: Path, fmt: str):
+    """(ok, note) for one converted output."""
+    if not dst.exists():
+        return False, "output missing"
+    if dst.stat().st_size == 0:
+        return False, "output is zero bytes"
+    if fmt == "dng":
+        with open(dst, "rb") as f:
+            if f.read(4) not in TIFF_MAGICS:
+                return False, "not a valid TIFF/DNG header"
+    src_dims = image_dimensions(src)
+    dst_dims = image_dimensions(dst)
+    if src_dims and dst_dims:
+        if not _dims_match(src_dims, dst_dims):
+            return False, ("dimension mismatch: raw %sx%s vs output %sx%s"
+                           % (src_dims + dst_dims))
+    elif dst_dims is None and fmt != "dng":
+        return False, "output unreadable"
+    return True, ""
+
+
+def cmd_verify(root: Path, fmt: str) -> dict:
+    """Validate every converted output for fmt; mark rows verified/failed."""
+    manifest = Manifest(root)
+    manifest.load()
+    counts = {"verified": 0, "failed": 0}
+    for row in manifest.rows():
+        if row["format"] != fmt or row["status"] not in ("converted",
+                                                         "verified"):
+            continue
+        src = root / row["source_relpath"]
+        dst = root / row["output_relpath"]
+        ok, note = _check_output(src, dst, fmt)
+        if ok:
+            manifest.set(row["source_relpath"], fmt, status="verified",
+                         note="")
+            counts["verified"] += 1
+        else:
+            manifest.set(row["source_relpath"], fmt, status="failed",
+                         note=note)
+            counts["failed"] += 1
+            print("VERIFY FAILED: %s (%s): %s"
+                  % (row["source_relpath"], fmt, note))
+    manifest.save()
+    print("verify --to %s: %d verified, %d failed"
+          % (fmt, counts["verified"], counts["failed"]))
+    if counts["failed"]:
+        print("Failed files stay protected: cleanup will not touch their"
+              " originals.")
+    return counts

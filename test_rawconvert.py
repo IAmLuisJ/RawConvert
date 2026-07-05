@@ -209,5 +209,80 @@ class TestConvert(ConvertTestCase):
         self.assertIn("boom", row["note"])
 
 
+class TestVerify(TempDirTestCase):
+    def seed(self, fmt="jpeg", out_name="a.jpg", out_bytes=b"JPEGDATA"):
+        (self.root / "a.CR2").write_bytes(b"RAW")
+        if out_bytes is not None:
+            (self.root / out_name).write_bytes(out_bytes)
+        m = rawconvert.Manifest(self.root)
+        m.set("a.CR2", fmt, output_relpath=out_name, status="converted",
+              src_bytes=3, out_bytes=len(out_bytes or b""), engine="test")
+        m.save()
+
+    def run_verify(self, fmt, dims):
+        """dims: maps filename -> (w, h) or None."""
+        def fake_dims(path):
+            return dims.get(Path(path).name)
+        with mock.patch.object(rawconvert, "image_dimensions",
+                               side_effect=fake_dims):
+            counts, _ = capture(rawconvert.cmd_verify, self.root, fmt)
+        m = rawconvert.Manifest(self.root)
+        m.load()
+        return counts, m
+
+    def test_matching_dimensions_verified(self):
+        self.seed()
+        counts, m = self.run_verify(
+            "jpeg", {"a.CR2": (6000, 4000), "a.jpg": (6000, 4000)})
+        self.assertEqual(counts["verified"], 1)
+        self.assertEqual(m.get("a.CR2", "jpeg")["status"], "verified")
+
+    def test_swapped_dimensions_verified(self):
+        self.seed()
+        counts, _ = self.run_verify(
+            "jpeg", {"a.CR2": (6000, 4000), "a.jpg": (4000, 6000)})
+        self.assertEqual(counts["verified"], 1)
+
+    def test_near_dimensions_verified(self):
+        # Canon sensor dims can differ from rendered dims by a few pixels
+        self.seed()
+        counts, _ = self.run_verify(
+            "jpeg", {"a.CR2": (6024, 4020), "a.jpg": (6000, 4000)})
+        self.assertEqual(counts["verified"], 1)
+
+    def test_dimension_mismatch_fails(self):
+        self.seed()
+        counts, m = self.run_verify(
+            "jpeg", {"a.CR2": (6000, 4000), "a.jpg": (3000, 2000)})
+        self.assertEqual(counts["failed"], 1)
+        row = m.get("a.CR2", "jpeg")
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("dimension", row["note"])
+
+    def test_missing_output_fails(self):
+        self.seed(out_bytes=None)
+        counts, m = self.run_verify("jpeg", {"a.CR2": (6000, 4000)})
+        self.assertEqual(counts["failed"], 1)
+        self.assertIn("missing", m.get("a.CR2", "jpeg")["note"])
+
+    def test_zero_byte_output_fails(self):
+        self.seed(out_bytes=b"")
+        counts, _ = self.run_verify(
+            "jpeg", {"a.CR2": (6000, 4000), "a.jpg": (6000, 4000)})
+        self.assertEqual(counts["failed"], 1)
+
+    def test_dng_with_tiff_magic_and_no_dims_verified(self):
+        self.seed(fmt="dng", out_name="a.dng", out_bytes=b"II*\x00rest")
+        counts, _ = self.run_verify("dng", {"a.CR2": (6000, 4000),
+                                            "a.dng": None})
+        self.assertEqual(counts["verified"], 1)
+
+    def test_dng_with_bad_magic_fails(self):
+        self.seed(fmt="dng", out_name="a.dng", out_bytes=b"NOTATIFF")
+        counts, _ = self.run_verify("dng", {"a.CR2": (6000, 4000),
+                                            "a.dng": None})
+        self.assertEqual(counts["failed"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
