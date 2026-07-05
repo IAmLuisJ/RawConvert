@@ -36,10 +36,13 @@ class EngineError(RuntimeError):
     """A conversion engine failed for one file."""
 
 
-def find_raw_files(root: Path) -> list:
-    """All CR2/CR3 files under root (case-insensitive), skipping the trash dir."""
+def find_raw_files(root: Path, recurse: bool = True) -> list:
+    """All CR2/CR3 files under root (case-insensitive), skipping the trash dir.
+
+    With recurse=False, only the top level of root is considered.
+    """
     found = []
-    for path in sorted(root.rglob("*")):
+    for path in sorted(root.rglob("*") if recurse else root.glob("*")):
         if not path.is_file():
             continue
         if path.suffix.lower() not in RAW_EXTS:
@@ -255,9 +258,9 @@ def cmd_doctor() -> int:
     return 0 if sips_ok else 1
 
 
-def cmd_scan(root: Path) -> int:
+def cmd_scan(root: Path, recurse: bool = True) -> int:
     """Inventory RAW files: counts, sizes, and estimated savings."""
-    files = find_raw_files(root)
+    files = find_raw_files(root, recurse=recurse)
     total = 0
     by_ext = {}
     for path in files:
@@ -295,7 +298,8 @@ def _root_field(out_base: Path, root: Path) -> str:
 
 
 def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
-                dry_run: bool = False, output_root=None) -> dict:
+                dry_run: bool = False, output_root=None,
+                recurse: bool = True) -> dict:
     """Convert every RAW under root to fmt. Idempotent and resumable.
 
     With output_root, outputs mirror the source folder structure under that
@@ -305,7 +309,7 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
     out_base = Path(output_root).expanduser().resolve() if output_root else root
     manifest = Manifest(root)
     manifest.load()
-    files = find_raw_files(root)
+    files = find_raw_files(root, recurse=recurse)
     if sample:
         files = files[:sample]
     counts = {"converted": 0, "skipped": 0, "failed": 0, "collision": 0}
@@ -575,11 +579,16 @@ def main(argv=None) -> int:
 
     sub.add_parser("doctor", help="check required external tools")
 
+    no_recurse_help = ("only process files directly inside FOLDER, ignoring"
+                       " its subfolders (default: recurse into all)")
+
     p = sub.add_parser("scan", help="inventory RAW files and estimate savings")
     p.add_argument("folder", type=_folder)
+    p.add_argument("--no-recurse", action="store_true", help=no_recurse_help)
 
     p = sub.add_parser("convert", help="convert RAW files (idempotent)")
     p.add_argument("folder", type=_folder)
+    p.add_argument("--no-recurse", action="store_true", help=no_recurse_help)
     p.add_argument("--to", required=True, choices=sorted(FORMATS),
                    dest="fmt", help="output format")
     p.add_argument("--quality", type=int, default=90,
@@ -614,12 +623,13 @@ def main(argv=None) -> int:
     if args.command == "doctor":
         return cmd_doctor()
     if args.command == "scan":
-        return cmd_scan(args.folder)
+        return cmd_scan(args.folder, recurse=not args.no_recurse)
     if args.command == "convert":
         _require_engine(args.fmt)
         counts = cmd_convert(args.folder, args.fmt, quality=args.quality,
                              sample=args.sample, dry_run=args.dry_run,
-                             output_root=args.output)
+                             output_root=args.output,
+                             recurse=not args.no_recurse)
         return 1 if counts["failed"] else 0
     if args.command == "verify":
         counts = cmd_verify(args.folder, args.fmt)

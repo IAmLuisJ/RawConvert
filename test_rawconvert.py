@@ -35,6 +35,14 @@ class TestDiscovery(TempDirTestCase):
                 for p in rawconvert.find_raw_files(self.root)]
         self.assertEqual(rels, ["a.CR2", "sub/b.cr3"])
 
+    def test_no_recurse_finds_only_top_level(self):
+        (self.root / "sub").mkdir()
+        (self.root / "a.CR2").write_bytes(b"x")
+        (self.root / "sub/b.cr3").write_bytes(b"x")
+        rels = [str(p.relative_to(self.root))
+                for p in rawconvert.find_raw_files(self.root, recurse=False)]
+        self.assertEqual(rels, ["a.CR2"])
+
 
 class TestManifest(TempDirTestCase):
     def test_roundtrip_and_atomic_save(self):
@@ -176,6 +184,14 @@ class TestConvert(ConvertTestCase):
         self.assertEqual((self.root / "a.jpg").read_bytes(), b"PRECIOUS")
         self.assertEqual(self.manifest().get("a.CR2", "jpeg")["status"],
                          "collision")
+
+    def test_no_recurse_converts_only_top_level(self):
+        self.make_raws("a.CR2", "sub/b.cr3")
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "jpeg",
+                            recurse=False)
+        self.assertEqual(counts["converted"], 1)
+        self.assertTrue((self.root / "a.jpg").exists())
+        self.assertFalse((self.root / "sub/b.jpg").exists())
 
     def test_sample_limits_file_count(self):
         self.make_raws("a.CR2", "b.CR2", "c.CR2")
