@@ -142,6 +142,63 @@ def image_dimensions(path: Path):
     return None
 
 
+def extract_embedded_jpeg(src: Path, dst: Path) -> bool:
+    """Extract the camera-rendered full-size JPEG embedded in a RAW file.
+
+    Returns False when exiftool is missing, no embedded JPEG exists, or the
+    embedded image is undersized (<90% of the RAW width) — callers then fall
+    back to a sips re-render.
+    """
+    if not have_exiftool():
+        return False
+    src_dims = image_dimensions(src)
+    for tag in ("-JpgFromRaw", "-PreviewImage"):
+        rc, out, _ = run(["exiftool", "-b", tag, str(src)])
+        if rc != 0 or not out:
+            continue
+        dst.write_bytes(out)
+        if src_dims:
+            got = image_dimensions(dst)
+            if not got or max(got) < 0.9 * max(src_dims):
+                dst.unlink()
+                continue
+        return True
+    return False
+
+
+def sips_convert(src: Path, dst: Path, fmt: str, quality: int) -> None:
+    """Render src to dst via Apple's RAW engine (fmt: 'jpeg' or 'heic')."""
+    args = ["sips", "-s", "format", fmt,
+            "-s", "formatOptions", str(quality),
+            str(src), "--out", str(dst)]
+    rc, out, err = run(args)
+    if rc != 0 or not dst.exists():
+        detail = err.strip() or out.decode(errors="replace").strip()
+        raise EngineError("sips failed: %s" % detail)
+
+
+def dng_convert(src: Path, dst: Path) -> None:
+    """Convert src to lossy-compressed DNG via Adobe DNG Converter."""
+    app = dng_converter()
+    if app is None:
+        raise EngineError("Adobe DNG Converter is not installed "
+                          "(run: rawconvert.py doctor)")
+    rc, _, err = run([app, "-lossy", "-p1",
+                      "-d", str(dst.parent), "-o", dst.name, str(src)])
+    if rc != 0 or not dst.exists():
+        raise EngineError("DNG Converter failed: %s" % err.strip())
+
+
+def copy_metadata(src: Path, dst: Path) -> None:
+    """Copy EXIF/GPS/date tags from the RAW to the output (needs exiftool)."""
+    if not have_exiftool():
+        return
+    run(["exiftool", "-overwrite_original", "-quiet",
+         "-TagsFromFile", str(src),
+         "-all:all", "--previewimage", "--jpgfromraw", "--thumbnailimage",
+         str(dst)])
+
+
 def _int_or_none(text):
     try:
         return int(text.strip())
@@ -214,3 +271,87 @@ def cmd_scan(root: Path) -> int:
               " ~%s as lossy DNG (~55%% saved)" %
               (human_size(total * 0.25), human_size(total * 0.45)))
     return 0
+
+
+MANIFEST_FLUSH_EVERY = 25
+
+
+def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
+                dry_run: bool = False) -> dict:
+    """Convert every RAW under root to fmt. Idempotent and resumable."""
+    ext = FORMATS[fmt]
+    manifest = Manifest(root)
+    manifest.load()
+    files = find_raw_files(root)
+    if sample:
+        files = files[:sample]
+    counts = {"converted": 0, "skipped": 0, "failed": 0, "collision": 0}
+    pending = 0
+
+    for src in files:
+        rel = str(src.relative_to(root))
+        dst = src.with_suffix(ext)
+        out_rel = str(dst.relative_to(root))
+        row = manifest.get(rel, fmt)
+
+        if row and row["status"] in ("converted", "verified") and dst.exists():
+            counts["skipped"] += 1
+            continue
+        if dst.exists() and (row is None or row["status"] == "collision"):
+            # An output we did not create — never overwrite it.
+            counts["collision"] += 1
+            print("COLLISION: %s already exists and was not created by"
+                  " rawconvert; skipping %s" % (out_rel, rel))
+            if not dry_run:
+                manifest.set(rel, fmt, output_relpath=out_rel,
+                             status="collision",
+                             note="pre-existing output; not overwritten")
+                pending += 1
+            continue
+        if dry_run:
+            print("DRY-RUN: would convert %s -> %s" % (rel, out_rel))
+            counts["converted"] += 1
+            continue
+
+        partial = dst.with_name(dst.name + ".partial")
+        engine = ""
+        try:
+            if fmt == "jpeg":
+                if extract_embedded_jpeg(src, partial):
+                    engine = "exiftool-embedded"
+                else:
+                    engine = "sips"
+                    sips_convert(src, partial, "jpeg", quality)
+            elif fmt == "heic":
+                engine = "sips"
+                sips_convert(src, partial, "heic", quality)
+            else:
+                engine = "dngconverter"
+                dng_convert(src, partial)
+            os.replace(partial, dst)
+            copy_metadata(src, dst)
+            shutil.copystat(str(src), str(dst))
+            manifest.set(rel, fmt, output_relpath=out_rel,
+                         src_bytes=src.stat().st_size,
+                         out_bytes=dst.stat().st_size,
+                         engine=engine, status="converted", note="")
+            counts["converted"] += 1
+        except EngineError as exc:
+            if partial.exists():
+                partial.unlink()
+            manifest.set(rel, fmt, output_relpath=out_rel, engine=engine,
+                         status="failed", note=str(exc)[:300])
+            counts["failed"] += 1
+            print("FAILED: %s: %s" % (rel, exc))
+        pending += 1
+        if pending >= MANIFEST_FLUSH_EVERY:
+            manifest.save()
+            pending = 0
+
+    if not dry_run and pending:
+        manifest.save()
+    print("convert --to %s: %d converted, %d skipped, %d failed,"
+          " %d collisions%s" %
+          (fmt, counts["converted"], counts["skipped"], counts["failed"],
+           counts["collision"], " (dry run)" if dry_run else ""))
+    return counts

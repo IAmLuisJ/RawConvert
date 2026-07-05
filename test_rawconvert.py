@@ -100,5 +100,114 @@ class TestScan(TempDirTestCase):
         self.assertIn("3.9 KB", out)  # 4000 bytes / 1024
 
 
+def fake_engine_write(src, dst, *args, **kwargs):
+    """Stand-in for a conversion engine: writes bytes to the target path."""
+    Path(dst).write_bytes(b"FAKEIMG")
+
+
+class ConvertTestCase(TempDirTestCase):
+    """Base: patches all real engines out of cmd_convert."""
+
+    def setUp(self):
+        super().setUp()
+        for name in ("sips_convert", "dng_convert"):
+            patcher = mock.patch.object(rawconvert, name,
+                                        side_effect=fake_engine_write)
+            setattr(self, name, patcher.start())
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(rawconvert, "extract_embedded_jpeg",
+                                    return_value=False)
+        self.extract_embedded_jpeg = patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(rawconvert, "copy_metadata")
+        self.copy_metadata = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def make_raws(self, *rels):
+        for rel in rels:
+            path = self.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"RAWDATA-" + rel.encode())
+
+    def manifest(self):
+        m = rawconvert.Manifest(self.root)
+        m.load()
+        return m
+
+
+class TestConvert(ConvertTestCase):
+    def test_converts_all_and_records_manifest(self):
+        self.make_raws("a.CR2", "sub/b.cr3")
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "jpeg")
+        self.assertEqual(counts["converted"], 2)
+        self.assertTrue((self.root / "a.jpg").exists())
+        self.assertTrue((self.root / "sub/b.jpg").exists())
+        self.assertFalse(list(self.root.rglob("*.partial")))
+        row = self.manifest().get("a.CR2", "jpeg")
+        self.assertEqual(row["status"], "converted")
+        self.assertEqual(row["engine"], "sips")
+        self.assertEqual(row["out_bytes"], str(len(b"FAKEIMG")))
+        self.assertTrue(int(row["src_bytes"]) > 0)
+
+    def test_jpeg_prefers_embedded_extraction(self):
+        self.make_raws("a.CR2")
+        self.extract_embedded_jpeg.side_effect = (
+            lambda src, dst: (fake_engine_write(src, dst), True)[1])
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "jpeg")
+        self.assertEqual(counts["converted"], 1)
+        self.sips_convert.assert_not_called()
+        self.assertEqual(self.manifest().get("a.CR2", "jpeg")["engine"],
+                         "exiftool-embedded")
+
+    def test_rerun_skips_already_converted(self):
+        self.make_raws("a.CR2")
+        capture(rawconvert.cmd_convert, self.root, "heic")
+        first_calls = self.sips_convert.call_count
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "heic")
+        self.assertEqual(self.sips_convert.call_count, first_calls)
+        self.assertEqual(counts["skipped"], 1)
+        self.assertEqual(counts["converted"], 0)
+
+    def test_collision_is_not_overwritten(self):
+        self.make_raws("a.CR2")
+        (self.root / "a.jpg").write_bytes(b"PRECIOUS")
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "jpeg")
+        self.assertEqual(counts["collision"], 1)
+        self.assertEqual((self.root / "a.jpg").read_bytes(), b"PRECIOUS")
+        self.assertEqual(self.manifest().get("a.CR2", "jpeg")["status"],
+                         "collision")
+
+    def test_sample_limits_file_count(self):
+        self.make_raws("a.CR2", "b.CR2", "c.CR2")
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "heic",
+                            sample=2)
+        self.assertEqual(counts["converted"], 2)
+
+    def test_dry_run_changes_nothing(self):
+        self.make_raws("a.CR2")
+        counts, out = capture(rawconvert.cmd_convert, self.root, "jpeg",
+                              dry_run=True)
+        self.assertIn("a.CR2", out)
+        self.assertFalse((self.root / "a.jpg").exists())
+        self.assertFalse((self.root / rawconvert.MANIFEST_NAME).exists())
+
+    def test_engine_failure_recorded_and_batch_continues(self):
+        self.make_raws("a.CR2", "b.CR2")
+
+        def explode_on_a(src, dst, *args, **kwargs):
+            if Path(src).name == "a.CR2":
+                raise rawconvert.EngineError("boom")
+            fake_engine_write(src, dst)
+
+        self.sips_convert.side_effect = explode_on_a
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "heic")
+        self.assertEqual(counts["failed"], 1)
+        self.assertEqual(counts["converted"], 1)
+        self.assertFalse(list(self.root.rglob("*.partial")))
+        row = self.manifest().get("a.CR2", "heic")
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("boom", row["note"])
+
+
 if __name__ == "__main__":
     unittest.main()
