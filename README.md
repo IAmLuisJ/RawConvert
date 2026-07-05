@@ -13,6 +13,9 @@ RAW → JPEG/HEIC is one-way. You permanently lose the RAW editing latitude
 (editable, ~50% smaller); JPEG/HEIC are smaller still (~75%) but "developed".
 Back up the drive before the final cleanup step if you can.
 
+**[FORMATS.md](FORMATS.md) explains the trade-offs in depth** — what each
+format keeps and loses, size expectations, compatibility, and how to decide.
+
 ## Requirements
 
 | Tool | Needed for | Install |
