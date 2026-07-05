@@ -33,8 +33,8 @@ python3 rawconvert.py doctor
 |---|---|---|
 | `doctor` | Check which external tools are installed, with install links | |
 | `scan FOLDER` | Inventory RAW files: counts, sizes, estimated savings | `--no-recurse` |
-| `compare RAWFILE` | Convert **one** file to every available format and open the results in Preview | `--quality` |
-| `convert FOLDER --to FMT` | Convert all RAW files (idempotent — re-run to resume) | `--sample N`, `--quality`, `--output DIR`, `--no-recurse`, `--dry-run` |
+| `compare RAWFILE` | Convert **one** file to every available format and open the results in Preview | `--quality`, `--render` |
+| `convert FOLDER --to FMT` | Convert all RAW files (idempotent — re-run to resume) | `--sample N`, `--quality`, `--render`, `--output DIR`, `--no-recurse`, `--dry-run` |
 | `verify FOLDER --to FMT` | Validate outputs: existence, readability, pixel dimensions | |
 | `status FOLDER` | Per-format size comparison table from the manifest | |
 | `cleanup FOLDER --keep FMT` | Stage verified originals + rejected-format outputs for manual deletion | `--dry-run` |
@@ -138,8 +138,12 @@ investigate.
 ## Notes
 
 - JPEG uses the full-resolution JPEG your camera already embedded in the RAW
-  (via exiftool) — camera-accurate colors, very fast. If it's missing or
-  small, the file is re-rendered with Apple's RAW engine (`sips`).
+  (via exiftool) — camera-accurate colors, very fast, but its quality was
+  fixed at shoot time, so `--quality` doesn't apply. If the embedded JPEG is
+  missing or small, the file is re-rendered with Apple's RAW engine (`sips`),
+  where `--quality` does apply. Pass `--render` to force the re-render path
+  for every JPEG and take full control of quality/size (HEIC is always
+  rendered, so `--quality` always applies there).
 - HEIC (`sips`) is typically smaller than JPEG at similar quality; CR3
   support depends on your macOS version / camera model.
 - DNG uses Adobe DNG Converter with lossy compression (`-lossy`).
