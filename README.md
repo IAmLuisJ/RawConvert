@@ -78,6 +78,25 @@ The manifest remembers where each output went, so `verify`, `status`, and
 During `cleanup`, rejected-format outputs are staged in a
 `_rawconvert_trash/` on the drive they live on (moves never cross volumes).
 
+## When conversions fail
+
+Each failure is classified with an error code and appended to
+`_rawconvert_errors.log` in the scanned folder, including the raw engine
+output, a diagnosis, and concrete debug steps:
+
+| Code | Meaning |
+|---|---|
+| RC01 | macOS `._*` metadata sidecar, not a real photo (now skipped automatically) |
+| RC02 | File under 1 MB — truncated or not a real RAW |
+| RC03 | macOS can't decode this RAW (corrupt file, or camera not supported by this macOS) |
+| RC04 | Required tool not installed (see `doctor`) |
+| RC05 | Destination drive full |
+| RC06 | Permission denied (check Privacy & Security settings / read-only mount) |
+| RC99 | Unknown — engine output preserved in the log |
+
+Failed files are never touched by `cleanup`, so nothing is at risk while you
+investigate.
+
 ## Safety model
 
 - Outputs are written next to their RAW (`IMG_0001.CR3` → `IMG_0001.heic`)
