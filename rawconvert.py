@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 RAW_EXTS = {".cr2", ".cr3"}
@@ -662,6 +663,61 @@ def cmd_cleanup(root: Path, keep: str, dry_run: bool = False) -> dict:
     return counts
 
 
+def open_in_preview(paths) -> None:
+    run(["open", "-a", "Preview"] + [str(p) for p in paths])
+
+
+def cmd_compare(src: Path, quality: int = 90, out_dir=None) -> dict:
+    """Convert one RAW to every available format and open them in Preview.
+
+    Outputs go to a temp folder (not next to the source) and are not recorded
+    in any manifest — this is a throwaway quality/size trial.
+    """
+    if src.suffix.lower() not in RAW_EXTS:
+        sys.exit("compare expects a single CR2/CR3 file, got: %s" % src)
+    if out_dir is None:
+        out_dir = Path(tempfile.mkdtemp(prefix="rawconvert_compare_"))
+    src_bytes = src.stat().st_size
+    print("Comparing formats for %s (%s)" % (src.name, human_size(src_bytes)))
+    results = {}
+    for fmt in sorted(FORMATS):
+        dst = out_dir / (src.stem + FORMATS[fmt])
+        if fmt == "dng" and dng_converter() is None:
+            print("  dng:   skipped — Adobe DNG Converter not installed"
+                  " (see: doctor)")
+            continue
+        engine = ""
+        try:
+            if fmt == "jpeg":
+                if extract_embedded_jpeg(src, dst):
+                    engine = "exiftool-embedded"
+                else:
+                    engine = "sips"
+                    sips_convert(src, dst, "jpeg", quality)
+            elif fmt == "heic":
+                engine = "sips"
+                sips_convert(src, dst, "heic", quality)
+            else:
+                engine = "dngconverter"
+                dng_convert(src, dst)
+            copy_metadata(src, dst)
+            out_bytes = dst.stat().st_size
+            results[fmt] = dst
+            print("  %-6s %10s  %3.0f%% of RAW  (engine: %s)"
+                  % (fmt + ":", human_size(out_bytes),
+                     100.0 * out_bytes / src_bytes, engine))
+        except EngineError as exc:
+            print("  %-6s FAILED — %s" % (fmt + ":", exc))
+    if results:
+        print("Outputs kept in %s" % out_dir)
+        print("Opening %d files in Preview — flip through with arrow keys"
+              " and zoom to 100%% to judge quality." % len(results))
+        open_in_preview(sorted(results.values()))
+    else:
+        print("Nothing to open — every conversion failed.")
+    return results
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -670,6 +726,13 @@ def _folder(text: str) -> Path:
     path = Path(text).expanduser().resolve()
     if not path.is_dir():
         raise argparse.ArgumentTypeError("not a folder: %s" % text)
+    return path
+
+
+def _existing_file(text: str) -> Path:
+    path = Path(text).expanduser().resolve()
+    if not path.is_file():
+        raise argparse.ArgumentTypeError("not a file: %s" % text)
     return path
 
 
@@ -719,6 +782,14 @@ def main(argv=None) -> int:
     p.add_argument("--dry-run", action="store_true",
                    help="show what would happen without writing anything")
 
+    p = sub.add_parser(
+        "compare",
+        help="convert ONE file to every available format and open the"
+             " results in Preview")
+    p.add_argument("file", type=_existing_file, metavar="RAWFILE")
+    p.add_argument("--quality", type=int, default=90,
+                   help="JPEG/HEIC quality 1-100 (default 90)")
+
     p = sub.add_parser("verify", help="validate converted outputs")
     p.add_argument("folder", type=_folder)
     p.add_argument("--to", required=True, choices=sorted(FORMATS), dest="fmt")
@@ -748,6 +819,9 @@ def main(argv=None) -> int:
                              output_root=args.output,
                              recurse=not args.no_recurse)
         return 1 if counts["failed"] else 0
+    if args.command == "compare":
+        results = cmd_compare(args.file, quality=args.quality)
+        return 0 if results else 1
     if args.command == "verify":
         counts = cmd_verify(args.folder, args.fmt)
         return 1 if counts["failed"] else 0
