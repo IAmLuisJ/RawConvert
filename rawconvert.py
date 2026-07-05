@@ -669,12 +669,14 @@ def open_in_preview(paths) -> None:
     run(["open", "-a", "Preview"] + [str(p) for p in paths])
 
 
-def cmd_compare(src: Path, quality: int = 90, out_dir=None,
-                force_render: bool = False) -> dict:
-    """Convert one RAW to every available format and open them in Preview.
+def cmd_compare(src: Path, quality: int = 90, out_dir=None) -> dict:
+    """Convert one RAW to every available format/engine and open in Preview.
 
-    Outputs go to a temp folder (not next to the source) and are not recorded
-    in any manifest — this is a throwaway quality/size trial.
+    JPEG is produced twice when possible — once from the camera's embedded
+    JPEG (exiftool) and once re-rendered by Apple's RAW engine at `quality` —
+    so the two engines can be compared directly. Outputs go to a temp folder
+    (not next to the source) and are not recorded in any manifest — this is a
+    throwaway quality/size trial.
     """
     if src.suffix.lower() not in RAW_EXTS:
         sys.exit("compare expects a single CR2/CR3 file, got: %s" % src)
@@ -683,34 +685,62 @@ def cmd_compare(src: Path, quality: int = 90, out_dir=None,
     src_bytes = src.stat().st_size
     print("Comparing formats for %s (%s)" % (src.name, human_size(src_bytes)))
     results = {}
-    for fmt in sorted(FORMATS):
-        dst = out_dir / (src.stem + FORMATS[fmt])
-        if fmt == "dng" and dng_converter() is None:
-            print("  dng:   skipped — Adobe DNG Converter not installed"
-                  " (see: doctor)")
-            continue
-        engine = ""
+
+    def report(key, label, dst):
+        copy_metadata(src, dst)
+        out_bytes = dst.stat().st_size
+        results[key] = dst
+        print("  %-24s %10s  %3.0f%% of RAW"
+              % (label, human_size(out_bytes),
+                 100.0 * out_bytes / src_bytes))
+
+    # JPEG, camera's embedded rendering (quality fixed at shoot time)
+    label = "jpeg (camera-embedded):"
+    if not have_exiftool():
+        print("  %-24s skipped — exiftool not installed (see: doctor)"
+              % label)
+    else:
+        dst = out_dir / (src.stem + "_embedded.jpg")
         try:
-            if fmt == "jpeg":
-                if not force_render and extract_embedded_jpeg(src, dst):
-                    engine = "exiftool-embedded"
-                else:
-                    engine = "sips"
-                    sips_convert(src, dst, "jpeg", quality)
-            elif fmt == "heic":
-                engine = "sips"
-                sips_convert(src, dst, "heic", quality)
+            if extract_embedded_jpeg(src, dst):
+                report("jpeg-embedded", label, dst)
             else:
-                engine = "dngconverter"
-                dng_convert(src, dst)
-            copy_metadata(src, dst)
-            out_bytes = dst.stat().st_size
-            results[fmt] = dst
-            print("  %-6s %10s  %3.0f%% of RAW  (engine: %s)"
-                  % (fmt + ":", human_size(out_bytes),
-                     100.0 * out_bytes / src_bytes, engine))
+                print("  %-24s skipped — no usable full-size embedded JPEG"
+                      % label)
         except EngineError as exc:
-            print("  %-6s FAILED — %s" % (fmt + ":", exc))
+            print("  %-24s FAILED — %s" % (label, exc))
+
+    # JPEG, Apple's RAW engine at the requested quality
+    label = "jpeg (sips q%d):" % quality
+    dst = out_dir / (src.stem + "_rendered.jpg")
+    try:
+        sips_convert(src, dst, "jpeg", quality)
+        report("jpeg-rendered", label, dst)
+    except EngineError as exc:
+        print("  %-24s FAILED — %s" % (label, exc))
+
+    # HEIC (always rendered)
+    label = "heic (sips q%d):" % quality
+    dst = out_dir / (src.stem + ".heic")
+    try:
+        sips_convert(src, dst, "heic", quality)
+        report("heic", label, dst)
+    except EngineError as exc:
+        print("  %-24s FAILED — %s" % (label, exc))
+
+    # Lossy DNG
+    label = "dng (lossy):"
+    if dng_converter() is None:
+        print("  %-24s skipped — Adobe DNG Converter not installed"
+              " (see: doctor)" % label)
+    else:
+        dst = out_dir / (src.stem + ".dng")
+        try:
+            dng_convert(src, dst)
+            report("dng", label, dst)
+        except EngineError as exc:
+            print("  %-24s FAILED — %s" % (label, exc))
+
     if results:
         print("Outputs kept in %s" % out_dir)
         print("Opening %d files in Preview — flip through with arrow keys"
@@ -792,12 +822,11 @@ def main(argv=None) -> int:
 
     p = sub.add_parser(
         "compare",
-        help="convert ONE file to every available format and open the"
-             " results in Preview")
+        help="convert ONE file to every available format — including both"
+             " JPEG engines — and open the results in Preview")
     p.add_argument("file", type=_existing_file, metavar="RAWFILE")
     p.add_argument("--quality", type=int, default=90,
                    help="JPEG/HEIC quality 1-100 (default 90)")
-    p.add_argument("--render", action="store_true", help=render_help)
 
     p = sub.add_parser("verify", help="validate converted outputs")
     p.add_argument("folder", type=_folder)
@@ -830,8 +859,7 @@ def main(argv=None) -> int:
                              force_render=args.render)
         return 1 if counts["failed"] else 0
     if args.command == "compare":
-        results = cmd_compare(args.file, quality=args.quality,
-                              force_render=args.render)
+        results = cmd_compare(args.file, quality=args.quality)
         return 0 if results else 1
     if args.command == "verify":
         counts = cmd_verify(args.folder, args.fmt)

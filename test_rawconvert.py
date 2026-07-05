@@ -495,28 +495,37 @@ class TestCompare(ConvertTestCase):
         self.out_dir = self.root / "cmp"
         self.out_dir.mkdir()
 
-    def test_converts_to_all_formats_and_opens_preview(self):
+    def test_both_jpeg_engines_compared_when_embedded_available(self):
         self.make_raws("a.CR3")
-        with mock.patch.object(rawconvert, "dng_converter",
+        self.extract_embedded_jpeg.side_effect = (
+            lambda src, dst: (fake_engine_write(src, dst), True)[1])
+        with mock.patch.object(rawconvert, "have_exiftool",
+                               return_value=True), \
+             mock.patch.object(rawconvert, "dng_converter",
                                return_value="/fake/converter"):
             results, out = capture(rawconvert.cmd_compare,
                                    self.root / "a.CR3",
                                    out_dir=self.out_dir)
-        self.assertEqual(sorted(results), ["dng", "heic", "jpeg"])
+        self.assertEqual(sorted(results),
+                         ["dng", "heic", "jpeg-embedded", "jpeg-rendered"])
+        self.assertNotEqual(results["jpeg-embedded"],
+                            results["jpeg-rendered"])
         for path in results.values():
             self.assertTrue(path.exists())
         opened = self.open_in_preview.call_args[0][0]
-        self.assertEqual(len(opened), 3)
+        self.assertEqual(len(opened), 4)
         self.assertIn("% of RAW", out)
 
-    def test_dng_skipped_when_converter_missing(self):
-        self.make_raws("a.CR3")
-        with mock.patch.object(rawconvert, "dng_converter",
+    def test_embedded_variant_skipped_when_no_embedded_jpeg(self):
+        self.make_raws("a.CR3")   # extract_embedded_jpeg returns False
+        with mock.patch.object(rawconvert, "have_exiftool",
+                               return_value=True), \
+             mock.patch.object(rawconvert, "dng_converter",
                                return_value=None):
             results, out = capture(rawconvert.cmd_compare,
                                    self.root / "a.CR3",
                                    out_dir=self.out_dir)
-        self.assertEqual(sorted(results), ["heic", "jpeg"])
+        self.assertEqual(sorted(results), ["heic", "jpeg-rendered"])
         self.assertIn("skipped", out)
         self.assertEqual(len(self.open_in_preview.call_args[0][0]), 2)
 
@@ -529,12 +538,14 @@ class TestCompare(ConvertTestCase):
             fake_engine_write(src, dst)
 
         self.sips_convert.side_effect = heic_explodes
-        with mock.patch.object(rawconvert, "dng_converter",
+        with mock.patch.object(rawconvert, "have_exiftool",
+                               return_value=False), \
+             mock.patch.object(rawconvert, "dng_converter",
                                return_value=None):
             results, out = capture(rawconvert.cmd_compare,
                                    self.root / "a.CR3",
                                    out_dir=self.out_dir)
-        self.assertEqual(sorted(results), ["jpeg"])
+        self.assertEqual(sorted(results), ["jpeg-rendered"])
         self.assertIn("FAILED", out)
         self.assertEqual(len(self.open_in_preview.call_args[0][0]), 1)
 
@@ -544,17 +555,6 @@ class TestCompare(ConvertTestCase):
             capture(rawconvert.cmd_compare, self.root / "x.jpg",
                     out_dir=self.out_dir)
 
-    def test_render_flag_forces_sips_jpeg(self):
-        self.make_raws("a.CR3")
-        self.extract_embedded_jpeg.side_effect = (
-            lambda src, dst: (fake_engine_write(src, dst), True)[1])
-        with mock.patch.object(rawconvert, "dng_converter",
-                               return_value=None):
-            results, _ = capture(rawconvert.cmd_compare,
-                                 self.root / "a.CR3",
-                                 out_dir=self.out_dir, force_render=True)
-        self.assertIn("jpeg", results)
-        self.extract_embedded_jpeg.assert_not_called()
 
 
 class TestStatus(TempDirTestCase):
