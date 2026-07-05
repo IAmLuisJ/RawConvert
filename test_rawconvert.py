@@ -176,6 +176,18 @@ class TestConvert(ConvertTestCase):
         self.assertEqual(self.manifest().get("a.CR2", "jpeg")["engine"],
                          "exiftool-embedded")
 
+    def test_render_flag_forces_sips_and_skips_extraction(self):
+        self.make_raws("a.CR2")
+        self.extract_embedded_jpeg.side_effect = (
+            lambda src, dst: (fake_engine_write(src, dst), True)[1])
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "jpeg",
+                            force_render=True)
+        self.assertEqual(counts["converted"], 1)
+        self.extract_embedded_jpeg.assert_not_called()
+        self.sips_convert.assert_called_once()
+        self.assertEqual(self.manifest().get("a.CR2", "jpeg")["engine"],
+                         "sips")
+
     def test_rerun_skips_already_converted(self):
         self.make_raws("a.CR2")
         capture(rawconvert.cmd_convert, self.root, "heic")
@@ -531,6 +543,18 @@ class TestCompare(ConvertTestCase):
         with self.assertRaises(SystemExit):
             capture(rawconvert.cmd_compare, self.root / "x.jpg",
                     out_dir=self.out_dir)
+
+    def test_render_flag_forces_sips_jpeg(self):
+        self.make_raws("a.CR3")
+        self.extract_embedded_jpeg.side_effect = (
+            lambda src, dst: (fake_engine_write(src, dst), True)[1])
+        with mock.patch.object(rawconvert, "dng_converter",
+                               return_value=None):
+            results, _ = capture(rawconvert.cmd_compare,
+                                 self.root / "a.CR3",
+                                 out_dir=self.out_dir, force_render=True)
+        self.assertIn("jpeg", results)
+        self.extract_embedded_jpeg.assert_not_called()
 
 
 class TestStatus(TempDirTestCase):

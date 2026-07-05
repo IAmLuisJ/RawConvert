@@ -410,11 +410,13 @@ def _root_field(out_base: Path, root: Path) -> str:
 
 def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
                 dry_run: bool = False, output_root=None,
-                recurse: bool = True) -> dict:
+                recurse: bool = True, force_render: bool = False) -> dict:
     """Convert every RAW under root to fmt. Idempotent and resumable.
 
     With output_root, outputs mirror the source folder structure under that
     directory (e.g. on another drive) instead of sitting next to the RAWs.
+    With force_render, JPEGs skip the embedded-JPEG extraction and are always
+    re-rendered by sips, so `quality` takes effect.
     """
     ext = FORMATS[fmt]
     out_base = Path(output_root).expanduser().resolve() if output_root else root
@@ -459,7 +461,7 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
         engine = ""
         try:
             if fmt == "jpeg":
-                if extract_embedded_jpeg(src, partial):
+                if not force_render and extract_embedded_jpeg(src, partial):
                     engine = "exiftool-embedded"
                 else:
                     engine = "sips"
@@ -667,7 +669,8 @@ def open_in_preview(paths) -> None:
     run(["open", "-a", "Preview"] + [str(p) for p in paths])
 
 
-def cmd_compare(src: Path, quality: int = 90, out_dir=None) -> dict:
+def cmd_compare(src: Path, quality: int = 90, out_dir=None,
+                force_render: bool = False) -> dict:
     """Convert one RAW to every available format and open them in Preview.
 
     Outputs go to a temp folder (not next to the source) and are not recorded
@@ -689,7 +692,7 @@ def cmd_compare(src: Path, quality: int = 90, out_dir=None) -> dict:
         engine = ""
         try:
             if fmt == "jpeg":
-                if extract_embedded_jpeg(src, dst):
+                if not force_render and extract_embedded_jpeg(src, dst):
                     engine = "exiftool-embedded"
                 else:
                     engine = "sips"
@@ -761,6 +764,10 @@ def main(argv=None) -> int:
 
     no_recurse_help = ("only process files directly inside FOLDER, ignoring"
                        " its subfolders (default: recurse into all)")
+    render_help = ("JPEG only: always re-render with Apple's RAW engine at"
+                   " --quality, instead of extracting the camera's embedded"
+                   " JPEG (slower, Apple rendering instead of Canon's, but"
+                   " gives full quality/size control)")
 
     p = sub.add_parser("scan", help="inventory RAW files and estimate savings")
     p.add_argument("folder", type=_folder)
@@ -779,6 +786,7 @@ def main(argv=None) -> int:
                    help="write outputs under DIR (e.g. another drive),"
                         " mirroring the source folder structure, instead of"
                         " next to the RAW files")
+    p.add_argument("--render", action="store_true", help=render_help)
     p.add_argument("--dry-run", action="store_true",
                    help="show what would happen without writing anything")
 
@@ -789,6 +797,7 @@ def main(argv=None) -> int:
     p.add_argument("file", type=_existing_file, metavar="RAWFILE")
     p.add_argument("--quality", type=int, default=90,
                    help="JPEG/HEIC quality 1-100 (default 90)")
+    p.add_argument("--render", action="store_true", help=render_help)
 
     p = sub.add_parser("verify", help="validate converted outputs")
     p.add_argument("folder", type=_folder)
@@ -817,10 +826,12 @@ def main(argv=None) -> int:
         counts = cmd_convert(args.folder, args.fmt, quality=args.quality,
                              sample=args.sample, dry_run=args.dry_run,
                              output_root=args.output,
-                             recurse=not args.no_recurse)
+                             recurse=not args.no_recurse,
+                             force_render=args.render)
         return 1 if counts["failed"] else 0
     if args.command == "compare":
-        results = cmd_compare(args.file, quality=args.quality)
+        results = cmd_compare(args.file, quality=args.quality,
+                              force_render=args.render)
         return 0 if results else 1
     if args.command == "verify":
         counts = cmd_verify(args.folder, args.fmt)
