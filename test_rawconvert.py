@@ -176,6 +176,30 @@ class TestConvert(ConvertTestCase):
         self.assertEqual(self.manifest().get("a.CR2", "jpeg")["engine"],
                          "exiftool-embedded")
 
+    def test_progress_lines_shown_by_default(self):
+        self.make_raws("a.CR2", "sub/b.cr3")
+        _, out = capture(rawconvert.cmd_convert, self.root, "heic")
+        self.assertIn("2 RAW files to process", out)
+        self.assertIn("[1/2] a.CR2 -> a.heic", out)
+        self.assertIn("[2/2] sub/b.cr3 -> sub/b.heic", out)
+        self.assertIn("% of RAW", out)
+
+    def test_quiet_suppresses_progress_but_not_failures_or_summary(self):
+        self.make_raws("a.CR2", "b.CR2")
+
+        def explode_on_b(src, dst, *args, **kwargs):
+            if Path(src).name == "b.CR2":
+                raise rawconvert.EngineError("boom")
+            fake_engine_write(src, dst)
+
+        self.sips_convert.side_effect = explode_on_b
+        counts, out = capture(rawconvert.cmd_convert, self.root, "heic",
+                              quiet=True)
+        self.assertNotIn("[1/2]", out)
+        self.assertIn("FAILED", out)                      # failures always shown
+        self.assertIn("1 converted", out)                 # summary always shown
+        self.assertEqual(counts["converted"], 1)
+
     def test_render_flag_forces_sips_and_skips_extraction(self):
         self.make_raws("a.CR2")
         self.extract_embedded_jpeg.side_effect = (

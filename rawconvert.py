@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 RAW_EXTS = {".cr2", ".cr3"}
@@ -408,9 +409,19 @@ def _root_field(out_base: Path, root: Path) -> str:
     return "" if out_base == root else str(out_base)
 
 
+def _eta(elapsed: float, done: int, remaining: int) -> str:
+    seconds = elapsed / done * remaining
+    if seconds < 90:
+        return "%ds" % seconds
+    if seconds < 5400:
+        return "%dm" % (seconds / 60)
+    return "%.1fh" % (seconds / 3600)
+
+
 def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
                 dry_run: bool = False, output_root=None,
-                recurse: bool = True, force_render: bool = False) -> dict:
+                recurse: bool = True, force_render: bool = False,
+                quiet: bool = False) -> dict:
     """Convert every RAW under root to fmt. Idempotent and resumable.
 
     With output_root, outputs mirror the source folder structure under that
@@ -427,8 +438,12 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
         files = files[:sample]
     counts = {"converted": 0, "skipped": 0, "failed": 0, "collision": 0}
     pending = 0
+    started = time.monotonic()
+    if not quiet and not dry_run:
+        print("%d RAW files to process under %s" % (len(files), root),
+              flush=True)
 
-    for src in files:
+    for index, src in enumerate(files, 1):
         rel = str(src.relative_to(root))
         dst = out_base / src.relative_to(root).with_suffix(ext)
         out_rel = str(dst.relative_to(out_base))
@@ -481,6 +496,16 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
                          out_bytes=dst.stat().st_size,
                          engine=engine, status="converted", note="")
             counts["converted"] += 1
+            if not quiet:
+                out_bytes = dst.stat().st_size
+                src_size = src.stat().st_size
+                print("[%d/%d] %s -> %s  %s (%.0f%% of RAW)  ETA %s"
+                      % (index, len(files), rel, out_rel,
+                         human_size(out_bytes),
+                         100.0 * out_bytes / src_size if src_size else 0,
+                         _eta(time.monotonic() - started,
+                              counts["converted"], len(files) - index)),
+                      flush=True)
         except EngineError as exc:
             if partial.exists():
                 partial.unlink()
@@ -817,6 +842,9 @@ def main(argv=None) -> int:
                         " mirroring the source folder structure, instead of"
                         " next to the RAW files")
     p.add_argument("--render", action="store_true", help=render_help)
+    p.add_argument("--quiet", action="store_true",
+                   help="suppress per-file progress output (failures and the"
+                        " final summary are still shown)")
     p.add_argument("--dry-run", action="store_true",
                    help="show what would happen without writing anything")
 
@@ -856,7 +884,7 @@ def main(argv=None) -> int:
                              sample=args.sample, dry_run=args.dry_run,
                              output_root=args.output,
                              recurse=not args.no_recurse,
-                             force_render=args.render)
+                             force_render=args.render, quiet=args.quiet)
         return 1 if counts["failed"] else 0
     if args.command == "compare":
         results = cmd_compare(args.file, quality=args.quality)
