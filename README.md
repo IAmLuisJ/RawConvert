@@ -33,24 +33,26 @@ python3 rawconvert.py doctor
 # 1. See what's on the drive
 python3 rawconvert.py scan /Volumes/MyDrive/Photos
 
-# 2. Trial-convert a small sample to each candidate format
+# 2. Pick one representative photo and compare all formats side by side —
+#    converts it to every available format and opens the results in Preview
+python3 rawconvert.py compare /Volumes/MyDrive/Photos/2023/IMG_0421.CR3
+
+# (optional) trial a larger sample per format and compare aggregate sizes
 python3 rawconvert.py convert /Volumes/MyDrive/Photos --to jpeg --sample 10
 python3 rawconvert.py convert /Volumes/MyDrive/Photos --to heic --sample 10
 python3 rawconvert.py convert /Volumes/MyDrive/Photos --to dng  --sample 10
+python3 rawconvert.py status  /Volumes/MyDrive/Photos
 
-# 3. Compare sizes; open the outputs in Preview to compare quality
-python3 rawconvert.py status /Volumes/MyDrive/Photos
-
-# 4. Full conversion in your chosen format (safe to interrupt & re-run)
+# 3. Full conversion in your chosen format (safe to interrupt & re-run)
 python3 rawconvert.py convert /Volumes/MyDrive/Photos --to heic
 
-# 5. Verify every output (existence, readability, pixel dimensions)
+# 4. Verify every output (existence, readability, pixel dimensions)
 python3 rawconvert.py verify /Volumes/MyDrive/Photos --to heic
 
-# 6. Stage originals + losing-format samples for deletion
+# 5. Stage originals + losing-format samples for deletion
 python3 rawconvert.py cleanup /Volumes/MyDrive/Photos --keep heic
 
-# 7. Spot-check, then empty the staging folder YOURSELF
+# 6. Spot-check, then empty the staging folder YOURSELF
 #    /Volumes/MyDrive/Photos/_rawconvert_trash/
 ```
 

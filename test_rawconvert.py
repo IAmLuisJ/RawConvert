@@ -474,6 +474,65 @@ class TestManifestBackwardCompat(TempDirTestCase):
         m.save()  # must not raise
 
 
+class TestCompare(ConvertTestCase):
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(rawconvert, "open_in_preview")
+        self.open_in_preview = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.out_dir = self.root / "cmp"
+        self.out_dir.mkdir()
+
+    def test_converts_to_all_formats_and_opens_preview(self):
+        self.make_raws("a.CR3")
+        with mock.patch.object(rawconvert, "dng_converter",
+                               return_value="/fake/converter"):
+            results, out = capture(rawconvert.cmd_compare,
+                                   self.root / "a.CR3",
+                                   out_dir=self.out_dir)
+        self.assertEqual(sorted(results), ["dng", "heic", "jpeg"])
+        for path in results.values():
+            self.assertTrue(path.exists())
+        opened = self.open_in_preview.call_args[0][0]
+        self.assertEqual(len(opened), 3)
+        self.assertIn("% of RAW", out)
+
+    def test_dng_skipped_when_converter_missing(self):
+        self.make_raws("a.CR3")
+        with mock.patch.object(rawconvert, "dng_converter",
+                               return_value=None):
+            results, out = capture(rawconvert.cmd_compare,
+                                   self.root / "a.CR3",
+                                   out_dir=self.out_dir)
+        self.assertEqual(sorted(results), ["heic", "jpeg"])
+        self.assertIn("skipped", out)
+        self.assertEqual(len(self.open_in_preview.call_args[0][0]), 2)
+
+    def test_one_format_failing_does_not_block_others(self):
+        self.make_raws("a.CR3")
+
+        def heic_explodes(src, dst, fmt, quality):
+            if fmt == "heic":
+                raise rawconvert.EngineError("boom")
+            fake_engine_write(src, dst)
+
+        self.sips_convert.side_effect = heic_explodes
+        with mock.patch.object(rawconvert, "dng_converter",
+                               return_value=None):
+            results, out = capture(rawconvert.cmd_compare,
+                                   self.root / "a.CR3",
+                                   out_dir=self.out_dir)
+        self.assertEqual(sorted(results), ["jpeg"])
+        self.assertIn("FAILED", out)
+        self.assertEqual(len(self.open_in_preview.call_args[0][0]), 1)
+
+    def test_rejects_non_raw_file(self):
+        (self.root / "x.jpg").write_bytes(b"j")
+        with self.assertRaises(SystemExit):
+            capture(rawconvert.cmd_compare, self.root / "x.jpg",
+                    out_dir=self.out_dir)
+
+
 class TestStatus(TempDirTestCase):
     def test_status_reports_per_format_sizes(self):
         m = rawconvert.Manifest(self.root)
