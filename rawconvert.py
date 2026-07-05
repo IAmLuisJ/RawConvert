@@ -24,9 +24,11 @@ FORMATS = {"jpeg": ".jpg", "heic": ".heic", "dng": ".dng"}
 TRASH_DIRNAME = "_rawconvert_trash"
 MANIFEST_NAME = "_rawconvert_manifest.csv"
 MANIFEST_FIELDS = [
-    "source_relpath", "format", "output_relpath", "src_bytes",
+    "source_relpath", "format", "output_relpath", "output_root", "src_bytes",
     "out_bytes", "engine", "status", "timestamp", "note",
 ]
+# output_root: absolute path when outputs live outside the scanned folder
+# (e.g. another drive); empty when they sit next to their sources.
 # statuses: converted | verified | failed | collision | cleaned
 
 
@@ -61,6 +63,8 @@ class Manifest:
             return
         with open(self.path, newline="") as f:
             for row in csv.DictReader(f):
+                # tolerate manifests written before newer columns existed
+                row = {field: row.get(field) or "" for field in MANIFEST_FIELDS}
                 self._rows[(row["source_relpath"], row["format"])] = row
 
     def get(self, rel: str, fmt: str):
@@ -277,10 +281,28 @@ def cmd_scan(root: Path) -> int:
 MANIFEST_FLUSH_EVERY = 25
 
 
+def resolve_output(root: Path, row: dict):
+    """Absolute path of a manifest row's output, honoring its output_root."""
+    if not row["output_relpath"]:
+        return None
+    base = Path(row["output_root"]) if row["output_root"] else root
+    return base / row["output_relpath"]
+
+
+def _root_field(out_base: Path, root: Path) -> str:
+    """Manifest output_root value: empty for in-place outputs."""
+    return "" if out_base == root else str(out_base)
+
+
 def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
-                dry_run: bool = False) -> dict:
-    """Convert every RAW under root to fmt. Idempotent and resumable."""
+                dry_run: bool = False, output_root=None) -> dict:
+    """Convert every RAW under root to fmt. Idempotent and resumable.
+
+    With output_root, outputs mirror the source folder structure under that
+    directory (e.g. on another drive) instead of sitting next to the RAWs.
+    """
     ext = FORMATS[fmt]
+    out_base = Path(output_root).expanduser().resolve() if output_root else root
     manifest = Manifest(root)
     manifest.load()
     files = find_raw_files(root)
@@ -291,29 +313,33 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
 
     for src in files:
         rel = str(src.relative_to(root))
-        dst = src.with_suffix(ext)
-        out_rel = str(dst.relative_to(root))
+        dst = out_base / src.relative_to(root).with_suffix(ext)
+        out_rel = str(dst.relative_to(out_base))
         row = manifest.get(rel, fmt)
 
-        if row and row["status"] in ("converted", "verified") and dst.exists():
-            counts["skipped"] += 1
-            continue
+        if row and row["status"] in ("converted", "verified"):
+            prev = resolve_output(root, row)
+            if prev is not None and prev.exists():
+                counts["skipped"] += 1
+                continue
         if dst.exists() and (row is None or row["status"] == "collision"):
             # An output we did not create — never overwrite it.
             counts["collision"] += 1
             print("COLLISION: %s already exists and was not created by"
-                  " rawconvert; skipping %s" % (out_rel, rel))
+                  " rawconvert; skipping %s" % (dst, rel))
             if not dry_run:
                 manifest.set(rel, fmt, output_relpath=out_rel,
+                             output_root=_root_field(out_base, root),
                              status="collision",
                              note="pre-existing output; not overwritten")
                 pending += 1
             continue
         if dry_run:
-            print("DRY-RUN: would convert %s -> %s" % (rel, out_rel))
+            print("DRY-RUN: would convert %s -> %s" % (rel, dst))
             counts["converted"] += 1
             continue
 
+        dst.parent.mkdir(parents=True, exist_ok=True)
         partial = dst.with_name(dst.name + ".partial")
         engine = ""
         try:
@@ -333,6 +359,7 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
             copy_metadata(src, dst)
             shutil.copystat(str(src), str(dst))
             manifest.set(rel, fmt, output_relpath=out_rel,
+                         output_root=_root_field(out_base, root),
                          src_bytes=src.stat().st_size,
                          out_bytes=dst.stat().st_size,
                          engine=engine, status="converted", note="")
@@ -340,7 +367,9 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
         except EngineError as exc:
             if partial.exists():
                 partial.unlink()
-            manifest.set(rel, fmt, output_relpath=out_rel, engine=engine,
+            manifest.set(rel, fmt, output_relpath=out_rel,
+                         output_root=_root_field(out_base, root),
+                         engine=engine,
                          status="failed", note=str(exc)[:300])
             counts["failed"] += 1
             print("FAILED: %s: %s" % (rel, exc))
@@ -407,7 +436,7 @@ def cmd_verify(root: Path, fmt: str) -> dict:
                                                          "verified"):
             continue
         src = root / row["source_relpath"]
-        dst = root / row["output_relpath"]
+        dst = resolve_output(root, row)
         ok, note = _check_output(src, dst, fmt)
         if ok:
             manifest.set(row["source_relpath"], fmt, status="verified",
@@ -488,9 +517,13 @@ def cmd_cleanup(root: Path, keep: str, dry_run: bool = False) -> dict:
                     manifest.set(rel, keep, status="cleaned")
         elif (row["format"] != keep
               and row["status"] in ("converted", "verified")):
-            out = root / row["output_relpath"]
-            if out.exists():
-                _stage(out, trash / "rejected" / row["output_relpath"],
+            out = resolve_output(root, row)
+            if out is not None and out.exists():
+                # stage on the drive the output lives on, so the move is
+                # instant and never crosses volumes
+                out_trash = (Path(row["output_root"]) if row["output_root"]
+                             else root) / TRASH_DIRNAME
+                _stage(out, out_trash / "rejected" / row["output_relpath"],
                        dry_run)
                 counts["rejected_staged"] += 1
                 if not dry_run:
@@ -553,6 +586,10 @@ def main(argv=None) -> int:
                    help="JPEG/HEIC quality 1-100 (default 90)")
     p.add_argument("--sample", type=int, metavar="N",
                    help="convert only the first N files (for format trials)")
+    p.add_argument("--output", metavar="DIR", type=Path,
+                   help="write outputs under DIR (e.g. another drive),"
+                        " mirroring the source folder structure, instead of"
+                        " next to the RAW files")
     p.add_argument("--dry-run", action="store_true",
                    help="show what would happen without writing anything")
 
@@ -581,7 +618,8 @@ def main(argv=None) -> int:
     if args.command == "convert":
         _require_engine(args.fmt)
         counts = cmd_convert(args.folder, args.fmt, quality=args.quality,
-                             sample=args.sample, dry_run=args.dry_run)
+                             sample=args.sample, dry_run=args.dry_run,
+                             output_root=args.output)
         return 1 if counts["failed"] else 0
     if args.command == "verify":
         counts = cmd_verify(args.folder, args.fmt)

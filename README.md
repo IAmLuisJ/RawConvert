@@ -56,6 +56,24 @@ python3 rawconvert.py cleanup /Volumes/MyDrive/Photos --keep heic
 
 Add `--dry-run` to `convert` or `cleanup` to preview without changing anything.
 
+### Writing outputs to a different drive
+
+By default outputs sit next to their RAW files. Use `--output DIR` to mirror
+the source folder structure somewhere else — for example a second external
+drive:
+
+```sh
+python3 rawconvert.py convert /Volumes/MyDrive/Photos --to heic \
+    --output /Volumes/OtherDrive/PhotosConverted
+# /Volumes/MyDrive/Photos/2021/trip/IMG_001.CR3
+#   -> /Volumes/OtherDrive/PhotosConverted/2021/trip/IMG_001.heic
+```
+
+The manifest remembers where each output went, so `verify`, `status`, and
+`cleanup` are unchanged — you still point them at the *source* folder.
+During `cleanup`, rejected-format outputs are staged in a
+`_rawconvert_trash/` on the drive they live on (moves never cross volumes).
+
 ## Safety model
 
 - Outputs are written next to their RAW (`IMG_0001.CR3` → `IMG_0001.heic`)
