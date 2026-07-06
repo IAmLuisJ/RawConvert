@@ -152,11 +152,16 @@ investigate.
 - HEIC (`sips`) is typically smaller than JPEG at similar quality; CR3
   support depends on your macOS version / camera model.
 - DNG uses Adobe DNG Converter with lossy compression (`-lossy`). By default
-  the converter app is launched once per file (~0.2 s overhead each); on big
-  runs, `--batch-size 25` converts 25 files per launch, cutting minutes off
-  thousand-file folders. Batched outputs go through a hidden staging folder,
-  so interrupt-safety is unchanged; per-file failures within a batch are
-  still detected and logged individually.
+  the converter app is launched once per file. `--batch-size N` converts N
+  files per launch instead — but benchmarks on real 82 MB CR3s (DNG
+  Converter 16.x, M-series Mac) found batching **slower** than per-file
+  (~19 s vs ~25 s per 10 files) with ~50% more CPU: the converter is heavily
+  multithreaded per conversion, so launch overhead (~0.2 s) is negligible and
+  batch mode schedules work less efficiently. **Recommendation: keep the
+  default.** The flag remains for machines where the trade-off differs —
+  measure with `--sample` before using it. Batched outputs go through a
+  hidden staging folder, so interrupt-safety is unchanged and per-file
+  failures within a batch are still detected and logged individually.
 - EXIF/GPS/capture-date metadata and file modification times are preserved
   (fully with exiftool installed).
 
