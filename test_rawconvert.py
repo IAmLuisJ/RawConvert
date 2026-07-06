@@ -414,6 +414,84 @@ class TestErrorLog(ConvertTestCase):
         self.assertFalse((self.root / rawconvert.ERROR_LOG_NAME).exists())
 
 
+def fake_batch_convert(srcs, staging_dir):
+    """Stand-in for dng_convert_batch: writes <stem>.dng per input."""
+    for src in srcs:
+        (Path(staging_dir) / (Path(src).stem + ".dng")).write_bytes(b"FAKEDNG")
+    return ""
+
+
+class TestDngBatch(ConvertTestCase):
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(rawconvert, "dng_convert_batch",
+                                    side_effect=fake_batch_convert)
+        self.dng_convert_batch = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def batch_sizes(self):
+        return [len(call.args[0])
+                for call in self.dng_convert_batch.call_args_list]
+
+    def test_batches_grouped_by_size(self):
+        self.make_raws("a.CR2", "b.CR2", "c.CR2", "d.CR2", "e.CR2")
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "dng",
+                            batch_size=2)
+        self.assertEqual(counts["converted"], 5)
+        self.assertEqual(self.batch_sizes(), [2, 2, 1])
+        self.dng_convert.assert_not_called()
+        for stem in "abcde":
+            self.assertTrue((self.root / (stem + ".dng")).exists())
+        row = self.manifest().get("a.CR2", "dng")
+        self.assertEqual(row["status"], "converted")
+        self.assertEqual(row["engine"], "dngconverter-batch")
+        # staging dir cleaned up
+        self.assertFalse(list(self.root.rglob(".rawconvert_dng_staging")))
+
+    def test_batches_grouped_by_destination_folder(self):
+        self.make_raws("a.CR2", "sub/b.CR2")
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "dng",
+                            batch_size=10)
+        self.assertEqual(counts["converted"], 2)
+        self.assertEqual(self.batch_sizes(), [1, 1])
+        self.assertTrue((self.root / "sub/b.dng").exists())
+
+    def test_partial_batch_failure_isolated_per_file(self):
+        self.make_raws("a.CR2", "b.CR2")
+
+        def skip_a(srcs, staging_dir):
+            fake_batch_convert([s for s in srcs if Path(s).stem != "a"],
+                               staging_dir)
+            return "some converter stderr"
+
+        self.dng_convert_batch.side_effect = skip_a
+        counts, out = capture(rawconvert.cmd_convert, self.root, "dng",
+                              batch_size=2)
+        self.assertEqual(counts["converted"], 1)
+        self.assertEqual(counts["failed"], 1)
+        self.assertIn("FAILED", out)
+        row = self.manifest().get("a.CR2", "dng")
+        self.assertEqual(row["status"], "failed")
+        self.assertTrue((self.root / "b.dng").exists())
+        self.assertFalse((self.root / "a.dng").exists())
+
+    def test_batch_size_one_uses_per_file_engine(self):
+        self.make_raws("a.CR2")
+        counts, _ = capture(rawconvert.cmd_convert, self.root, "dng",
+                            batch_size=1)
+        self.assertEqual(counts["converted"], 1)
+        self.dng_convert_batch.assert_not_called()
+        self.dng_convert.assert_called_once()
+
+    def test_batch_size_ignored_for_other_formats(self):
+        self.make_raws("a.CR2")
+        counts, out = capture(rawconvert.cmd_convert, self.root, "heic",
+                              batch_size=8)
+        self.assertEqual(counts["converted"], 1)
+        self.dng_convert_batch.assert_not_called()
+        self.assertIn("dng only", out.lower())
+
+
 class TestConvertToOutputFolder(ConvertTestCase):
     def setUp(self):
         super().setUp()
