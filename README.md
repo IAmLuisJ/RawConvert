@@ -39,14 +39,16 @@ python3 rawconvert.py doctor
 | `doctor` | Check which external tools are installed, with install links | |
 | `scan FOLDER` | Inventory RAW files: counts, sizes, estimated savings | `--no-recurse` |
 | `compare RAWFILE` | Convert **one** file to every available format — JPEG via *both* engines (camera-embedded and sips re-render) — and open the results in Preview | `--quality` |
-| `convert FOLDER --to FMT` | Convert all RAW files with per-file progress and ETA (idempotent — re-run to resume) | `--sample N`, `--quality`, `--render`, `--output DIR`, `--no-recurse`, `--batch-size N`, `--quiet`, `--dry-run` |
-| `verify FOLDER --to FMT` | Validate outputs: existence, readability, pixel dimensions | |
+| `convert FOLDER` | Convert all RAW files with per-file progress and ETA (idempotent — re-run to resume) | `--to FMT`, `--sample N`, `--quality`, `--render`, `--output DIR`, `--no-recurse`, `--batch-size N`, `--quiet`, `--dry-run` |
+| `process FOLDER` | **One-shot pipeline**: scan → convert → verify → stage originals for manual deletion | same options as `convert` |
+| `verify FOLDER` | Validate outputs: existence, readability, pixel dimensions | `--to FMT` |
 | `status FOLDER` | Per-format size comparison table from the manifest | |
-| `cleanup FOLDER --keep FMT` | Stage verified originals + rejected-format outputs for manual deletion | `--dry-run` |
+| `cleanup FOLDER` | Stage verified originals + rejected-format outputs for manual deletion | `--keep FMT`, `--dry-run` |
 
-`FMT` is `jpeg`, `heic`, or `dng`. All folder commands recurse into
-subfolders by default and skip hidden files (including the `._*` metadata
-sidecars macOS scatters on FAT/exFAT drives).
+`FMT` is `jpeg`, `heic`, or `dng` — **`dng` is the default everywhere**
+(it measured best on real CR3s; see [FORMATS.md](FORMATS.md)). All folder
+commands recurse into subfolders by default and skip hidden files (including
+the `._*` metadata sidecars macOS scatters on FAT/exFAT drives).
 
 ## Workflow
 
@@ -66,18 +68,18 @@ python3 rawconvert.py convert /Volumes/MyDrive/Photos --to heic --sample 10
 python3 rawconvert.py convert /Volumes/MyDrive/Photos --to dng  --sample 10
 python3 rawconvert.py status  /Volumes/MyDrive/Photos
 
-# 3. Full conversion in your chosen format (safe to interrupt & re-run)
-python3 rawconvert.py convert /Volumes/MyDrive/Photos --to heic
+# 3. Once you've picked a format, run the whole pipeline in one command —
+#    scan, convert, verify, and stage originals (dng is the default;
+#    add --to heic/jpeg to override). Safe to interrupt & re-run.
+python3 rawconvert.py process /Volumes/MyDrive/Photos
 
-# 4. Verify every output (existence, readability, pixel dimensions)
-python3 rawconvert.py verify /Volumes/MyDrive/Photos --to heic
-
-# 5. Stage originals + losing-format samples for deletion
-python3 rawconvert.py cleanup /Volumes/MyDrive/Photos --keep heic
-
-# 6. Spot-check, then empty the staging folder YOURSELF
+# 4. Spot-check, then empty the staging folder YOURSELF
 #    /Volumes/MyDrive/Photos/_rawconvert_trash/
 ```
+
+Prefer step-by-step control? The pipeline stages are also standalone
+commands: `convert`, then `verify`, then `cleanup` (same defaults and
+options). Failed files never have their originals staged either way.
 
 Add `--dry-run` to `convert` or `cleanup` to preview without changing
 anything, and `--no-recurse` to `scan` or `convert` to limit a run to the top
