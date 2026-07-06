@@ -204,6 +204,23 @@ def dng_convert(src: Path, dst: Path) -> None:
         raise EngineError("DNG Converter failed: %s" % err.strip())
 
 
+def dng_convert_batch(srcs, staging_dir: Path) -> str:
+    """Convert many RAWs in ONE Adobe DNG Converter launch.
+
+    Outputs land in staging_dir as <stem>.dng. The converter reports errors
+    per file on stderr but keeps going, so the return code is unreliable for
+    batches — callers must treat each missing/empty output as that file's
+    failure. Returns the batch stderr for attribution.
+    """
+    app = dng_converter()
+    if app is None:
+        raise EngineError("Adobe DNG Converter is not installed "
+                          "(run: rawconvert.py doctor)")
+    _, _, err = run([app, "-lossy", "-p1", "-d", str(staging_dir)]
+                    + [str(s) for s in srcs])
+    return err
+
+
 def copy_metadata(src: Path, dst: Path) -> None:
     """Copy EXIF/GPS/date tags from the RAW to the output (needs exiftool)."""
     if not have_exiftool():
@@ -418,16 +435,21 @@ def _eta(elapsed: float, done: int, remaining: int) -> str:
     return "%.1fh" % (seconds / 3600)
 
 
+DNG_STAGING_DIRNAME = ".rawconvert_dng_staging"
+
+
 def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
                 dry_run: bool = False, output_root=None,
                 recurse: bool = True, force_render: bool = False,
-                quiet: bool = False) -> dict:
+                quiet: bool = False, batch_size: int = 1) -> dict:
     """Convert every RAW under root to fmt. Idempotent and resumable.
 
     With output_root, outputs mirror the source folder structure under that
     directory (e.g. on another drive) instead of sitting next to the RAWs.
     With force_render, JPEGs skip the embedded-JPEG extraction and are always
     re-rendered by sips, so `quality` takes effect.
+    With batch_size > 1 (DNG only), that many files are converted per Adobe
+    DNG Converter launch, amortizing the app's startup cost.
     """
     ext = FORMATS[fmt]
     out_base = Path(output_root).expanduser().resolve() if output_root else root
@@ -439,9 +461,71 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
     counts = {"converted": 0, "skipped": 0, "failed": 0, "collision": 0}
     pending = 0
     started = time.monotonic()
+    use_batch = fmt == "dng" and batch_size > 1
+    if batch_size > 1 and fmt != "dng":
+        print("Note: --batch-size applies to DNG only; ignored for %s." % fmt)
     if not quiet and not dry_run:
         print("%d RAW files to process under %s" % (len(files), root),
               flush=True)
+
+    def record_success(index, src, rel, dst, out_rel, engine):
+        nonlocal pending
+        copy_metadata(src, dst)
+        shutil.copystat(str(src), str(dst))
+        manifest.set(rel, fmt, output_relpath=out_rel,
+                     output_root=_root_field(out_base, root),
+                     src_bytes=src.stat().st_size,
+                     out_bytes=dst.stat().st_size,
+                     engine=engine, status="converted", note="")
+        counts["converted"] += 1
+        pending += 1
+        if not quiet:
+            out_bytes = dst.stat().st_size
+            src_size = src.stat().st_size
+            print("[%d/%d] %s -> %s  %s (%.0f%% of RAW)  ETA %s"
+                  % (index, len(files), rel, out_rel,
+                     human_size(out_bytes),
+                     100.0 * out_bytes / src_size if src_size else 0,
+                     _eta(time.monotonic() - started,
+                          counts["converted"], len(files) - index)),
+                  flush=True)
+
+    def record_failure(index, src, rel, out_rel, engine, message):
+        nonlocal pending
+        info = log_failure(root, rel, src, fmt, engine, message)
+        manifest.set(rel, fmt, output_relpath=out_rel,
+                     output_root=_root_field(out_base, root),
+                     engine=engine, status="failed",
+                     note=("[%s] %s: %s"
+                           % (info["code"], info["name"], message))[:300])
+        counts["failed"] += 1
+        pending += 1
+        print("FAILED [%s %s]: %s — %s"
+              % (info["code"], info["name"], rel, info["diagnosis"]))
+
+    batch = []  # (index, src, rel, dst, out_rel); all share one dst.parent
+
+    def flush_batch():
+        if not batch:
+            return
+        staging = batch[0][3].parent / DNG_STAGING_DIRNAME
+        staging.mkdir(exist_ok=True)
+        err = dng_convert_batch([entry[1] for entry in batch], staging)
+        for index, src, rel, dst, out_rel in batch:
+            produced = staging / (src.stem + ".dng")
+            if produced.exists() and produced.stat().st_size > 0:
+                os.replace(produced, dst)
+                record_success(index, src, rel, dst, out_rel,
+                               "dngconverter-batch")
+            else:
+                record_failure(index, src, rel, out_rel, "dngconverter-batch",
+                               "no output produced in batch mode;"
+                               " batch stderr: %s" % err.strip())
+        batch.clear()
+        try:
+            staging.rmdir()
+        except OSError:
+            pass  # stale files from an interrupted run; harmless
 
     for index, src in enumerate(files, 1):
         rel = str(src.relative_to(root))
@@ -472,58 +556,43 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
             continue
 
         dst.parent.mkdir(parents=True, exist_ok=True)
-        partial = dst.with_name(dst.name + ".partial")
-        engine = ""
-        try:
-            if fmt == "jpeg":
-                if not force_render and extract_embedded_jpeg(src, partial):
-                    engine = "exiftool-embedded"
-                else:
+
+        if use_batch:
+            if batch and batch[0][3].parent != dst.parent:
+                flush_batch()
+            batch.append((index, src, rel, dst, out_rel))
+            if len(batch) >= batch_size:
+                flush_batch()
+        else:
+            partial = dst.with_name(dst.name + ".partial")
+            engine = ""
+            try:
+                if fmt == "jpeg":
+                    if (not force_render
+                            and extract_embedded_jpeg(src, partial)):
+                        engine = "exiftool-embedded"
+                    else:
+                        engine = "sips"
+                        sips_convert(src, partial, "jpeg", quality)
+                elif fmt == "heic":
                     engine = "sips"
-                    sips_convert(src, partial, "jpeg", quality)
-            elif fmt == "heic":
-                engine = "sips"
-                sips_convert(src, partial, "heic", quality)
-            else:
-                engine = "dngconverter"
-                dng_convert(src, partial)
-            os.replace(partial, dst)
-            copy_metadata(src, dst)
-            shutil.copystat(str(src), str(dst))
-            manifest.set(rel, fmt, output_relpath=out_rel,
-                         output_root=_root_field(out_base, root),
-                         src_bytes=src.stat().st_size,
-                         out_bytes=dst.stat().st_size,
-                         engine=engine, status="converted", note="")
-            counts["converted"] += 1
-            if not quiet:
-                out_bytes = dst.stat().st_size
-                src_size = src.stat().st_size
-                print("[%d/%d] %s -> %s  %s (%.0f%% of RAW)  ETA %s"
-                      % (index, len(files), rel, out_rel,
-                         human_size(out_bytes),
-                         100.0 * out_bytes / src_size if src_size else 0,
-                         _eta(time.monotonic() - started,
-                              counts["converted"], len(files) - index)),
-                      flush=True)
-        except EngineError as exc:
-            if partial.exists():
-                partial.unlink()
-            info = log_failure(root, rel, src, fmt, engine, str(exc))
-            manifest.set(rel, fmt, output_relpath=out_rel,
-                         output_root=_root_field(out_base, root),
-                         engine=engine, status="failed",
-                         note=("[%s] %s: %s"
-                               % (info["code"], info["name"],
-                                  str(exc)))[:300])
-            counts["failed"] += 1
-            print("FAILED [%s %s]: %s — %s"
-                  % (info["code"], info["name"], rel, info["diagnosis"]))
-        pending += 1
+                    sips_convert(src, partial, "heic", quality)
+                else:
+                    engine = "dngconverter"
+                    dng_convert(src, partial)
+                os.replace(partial, dst)
+                record_success(index, src, rel, dst, out_rel, engine)
+            except EngineError as exc:
+                if partial.exists():
+                    partial.unlink()
+                record_failure(index, src, rel, out_rel, engine, str(exc))
+
         if pending >= MANIFEST_FLUSH_EVERY:
             manifest.save()
             pending = 0
 
+    if not dry_run:
+        flush_batch()
     if not dry_run and pending:
         manifest.save()
     print("convert --to %s: %d converted, %d skipped, %d failed,"
@@ -787,6 +856,13 @@ def _folder(text: str) -> Path:
     return path
 
 
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return value
+
+
 def _existing_file(text: str) -> Path:
     path = Path(text).expanduser().resolve()
     if not path.is_file():
@@ -842,6 +918,11 @@ def main(argv=None) -> int:
                         " mirroring the source folder structure, instead of"
                         " next to the RAW files")
     p.add_argument("--render", action="store_true", help=render_help)
+    p.add_argument("--batch-size", type=_positive_int, default=1,
+                   metavar="N",
+                   help="DNG only: convert N files per Adobe DNG Converter"
+                        " launch instead of one, amortizing the app's startup"
+                        " cost (default 1; try 25)")
     p.add_argument("--quiet", action="store_true",
                    help="suppress per-file progress output (failures and the"
                         " final summary are still shown)")
@@ -884,7 +965,8 @@ def main(argv=None) -> int:
                              sample=args.sample, dry_run=args.dry_run,
                              output_root=args.output,
                              recurse=not args.no_recurse,
-                             force_render=args.render, quiet=args.quiet)
+                             force_render=args.render, quiet=args.quiet,
+                             batch_size=args.batch_size)
         return 1 if counts["failed"] else 0
     if args.command == "compare":
         results = cmd_compare(args.file, quality=args.quality)
