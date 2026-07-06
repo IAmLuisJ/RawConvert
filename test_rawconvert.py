@@ -663,6 +663,77 @@ class TestCompare(ConvertTestCase):
 
 
 
+class TestDngDefaults(TempDirTestCase):
+    """--to / --keep are optional everywhere and default to dng."""
+
+    def test_convert_defaults_to_dng(self):
+        _, out = capture(rawconvert.main,
+                         ["convert", str(self.root), "--dry-run"])
+        self.assertIn("convert --to dng:", out)
+
+    def test_verify_defaults_to_dng(self):
+        _, out = capture(rawconvert.main, ["verify", str(self.root)])
+        self.assertIn("verify --to dng:", out)
+
+    def test_cleanup_defaults_to_dng(self):
+        _, out = capture(rawconvert.main, ["cleanup", str(self.root)])
+        self.assertIn("cleanup --keep dng:", out)
+
+
+class TestProcess(ConvertTestCase):
+    """process = scan + convert + verify + cleanup in one command."""
+
+    def run_process(self, fmt="heic", **kwargs):
+        def fake_dims(path):
+            return (6000, 4000)
+        with mock.patch.object(rawconvert, "image_dimensions",
+                               side_effect=fake_dims):
+            return capture(rawconvert.cmd_process, self.root, fmt, **kwargs)
+
+    def test_full_pipeline_converts_verifies_and_stages(self):
+        self.make_raws("a.CR2", "sub/b.cr3")
+        rc, out = self.run_process()
+        self.assertEqual(rc, 0)
+        for step in ("scan", "convert", "verify", "cleanup"):
+            self.assertIn(step, out)
+        # converted and verified
+        self.assertTrue((self.root / "a.heic").exists())
+        m = rawconvert.Manifest(self.root)
+        m.load()
+        self.assertEqual(m.get("a.CR2", "heic")["status"], "cleaned")
+        # originals staged, not deleted
+        trash = self.root / rawconvert.TRASH_DIRNAME
+        self.assertTrue((trash / "originals" / "a.CR2").exists())
+        self.assertTrue((trash / "originals" / "sub" / "b.cr3").exists())
+        self.assertFalse((self.root / "a.CR2").exists())
+
+    def test_failed_file_keeps_original_and_returns_nonzero(self):
+        self.make_raws("a.CR2", "b.CR2")
+
+        def explode_on_a(src, dst, *args, **kwargs):
+            if Path(src).name == "a.CR2":
+                raise rawconvert.EngineError("boom")
+            fake_engine_write(src, dst)
+
+        self.sips_convert.side_effect = explode_on_a
+        rc, out = self.run_process()
+        self.assertEqual(rc, 1)
+        # failed file's original untouched; good file staged
+        self.assertTrue((self.root / "a.CR2").exists())
+        self.assertFalse((self.root / "b.CR2").exists())
+        trash = self.root / rawconvert.TRASH_DIRNAME
+        self.assertTrue((trash / "originals" / "b.CR2").exists())
+
+    def test_dry_run_stops_before_verify_and_cleanup(self):
+        self.make_raws("a.CR2")
+        rc, out = self.run_process(dry_run=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("DRY-RUN", out)
+        self.assertNotIn("verify", out)
+        self.assertTrue((self.root / "a.CR2").exists())
+        self.assertFalse((self.root / rawconvert.TRASH_DIRNAME).exists())
+
+
 class TestStatus(TempDirTestCase):
     def test_status_reports_per_format_sizes(self):
         m = rawconvert.Manifest(self.root)

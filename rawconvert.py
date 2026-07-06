@@ -761,6 +761,44 @@ def cmd_cleanup(root: Path, keep: str, dry_run: bool = False) -> dict:
     return counts
 
 
+def cmd_process(root: Path, fmt: str, quality: int = 90, sample=None,
+                output_root=None, recurse: bool = True,
+                force_render: bool = False, quiet: bool = False,
+                batch_size: int = 1, dry_run: bool = False) -> int:
+    """One-shot pipeline: scan, convert, verify, then stage cleanup.
+
+    Only files whose outputs pass verification have their originals staged;
+    failures keep their originals in place. Nothing is ever hard-deleted —
+    the trash folder is still emptied manually.
+    """
+    print("== Step 1/4: scan ==")
+    cmd_scan(root, recurse=recurse)
+    print("\n== Step 2/4: convert (--to %s) ==" % fmt)
+    ccounts = cmd_convert(root, fmt, quality=quality, sample=sample,
+                          dry_run=dry_run, output_root=output_root,
+                          recurse=recurse, force_render=force_render,
+                          quiet=quiet, batch_size=batch_size)
+    if dry_run:
+        print("\nDry run — nothing was written. Run without --dry-run for"
+              " the full pipeline.")
+        return 0
+    print("\n== Step 3/4: verify ==")
+    vcounts = cmd_verify(root, fmt)
+    print("\n== Step 4/4: cleanup (stage originals) ==")
+    scounts = cmd_cleanup(root, fmt)
+    failed = ccounts["failed"] + vcounts["failed"]
+    print("\nprocess complete: %d converted, %d verified, %d originals"
+          " staged, %d failed"
+          % (ccounts["converted"], vcounts["verified"],
+             scounts["originals_staged"], failed))
+    if failed:
+        print("Failed files kept their originals in place — details in %s"
+              % (root / ERROR_LOG_NAME))
+    print("Spot-check %s and delete it yourself when satisfied."
+          % (root / TRASH_DIRNAME))
+    return 1 if failed else 0
+
+
 def open_in_preview(paths) -> None:
     run(["open", "-a", "Preview"] + [str(p) for p in paths])
 
@@ -906,30 +944,40 @@ def main(argv=None) -> int:
     p.add_argument("folder", type=_folder)
     p.add_argument("--no-recurse", action="store_true", help=no_recurse_help)
 
-    p = sub.add_parser("convert", help="convert RAW files (idempotent)")
-    p.add_argument("folder", type=_folder)
-    p.add_argument("--no-recurse", action="store_true", help=no_recurse_help)
-    p.add_argument("--to", required=True, choices=sorted(FORMATS),
-                   dest="fmt", help="output format")
-    p.add_argument("--quality", type=int, default=90,
-                   help="JPEG/HEIC quality 1-100 (default 90)")
-    p.add_argument("--sample", type=int, metavar="N",
-                   help="convert only the first N files (for format trials)")
-    p.add_argument("--output", metavar="DIR", type=Path,
-                   help="write outputs under DIR (e.g. another drive),"
-                        " mirroring the source folder structure, instead of"
-                        " next to the RAW files")
-    p.add_argument("--render", action="store_true", help=render_help)
-    p.add_argument("--batch-size", type=_positive_int, default=1,
-                   metavar="N",
-                   help="DNG only: convert N files per Adobe DNG Converter"
-                        " launch instead of one, amortizing the app's startup"
-                        " cost (default 1; try 25)")
-    p.add_argument("--quiet", action="store_true",
-                   help="suppress per-file progress output (failures and the"
-                        " final summary are still shown)")
-    p.add_argument("--dry-run", action="store_true",
-                   help="show what would happen without writing anything")
+    def add_convert_options(p):
+        p.add_argument("folder", type=_folder)
+        p.add_argument("--no-recurse", action="store_true",
+                       help=no_recurse_help)
+        p.add_argument("--to", choices=sorted(FORMATS), default="dng",
+                       dest="fmt", help="output format (default: dng)")
+        p.add_argument("--quality", type=int, default=90,
+                       help="JPEG/HEIC quality 1-100 (default 90)")
+        p.add_argument("--sample", type=int, metavar="N",
+                       help="convert only the first N files (for format"
+                            " trials)")
+        p.add_argument("--output", metavar="DIR", type=Path,
+                       help="write outputs under DIR (e.g. another drive),"
+                            " mirroring the source folder structure, instead"
+                            " of next to the RAW files")
+        p.add_argument("--render", action="store_true", help=render_help)
+        p.add_argument("--batch-size", type=_positive_int, default=1,
+                       metavar="N",
+                       help="DNG only: convert N files per Adobe DNG"
+                            " Converter launch (default 1; benchmarks show"
+                            " the default is usually fastest)")
+        p.add_argument("--quiet", action="store_true",
+                       help="suppress per-file progress output (failures and"
+                            " the final summary are still shown)")
+        p.add_argument("--dry-run", action="store_true",
+                       help="show what would happen without writing anything")
+
+    add_convert_options(sub.add_parser(
+        "convert", help="convert RAW files (idempotent)"))
+
+    add_convert_options(sub.add_parser(
+        "process",
+        help="one-shot pipeline: scan, convert, verify, then stage originals"
+             " for manual deletion"))
 
     p = sub.add_parser(
         "compare",
@@ -941,7 +989,8 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("verify", help="validate converted outputs")
     p.add_argument("folder", type=_folder)
-    p.add_argument("--to", required=True, choices=sorted(FORMATS), dest="fmt")
+    p.add_argument("--to", choices=sorted(FORMATS), default="dng",
+                   dest="fmt", help="format to verify (default: dng)")
 
     p = sub.add_parser("status", help="per-format size comparison")
     p.add_argument("folder", type=_folder)
@@ -951,8 +1000,8 @@ def main(argv=None) -> int:
         help="stage verified originals (and rejected-format outputs) into"
              " %s/ for manual deletion" % TRASH_DIRNAME)
     p.add_argument("folder", type=_folder)
-    p.add_argument("--keep", required=True, choices=sorted(FORMATS),
-                   help="the format you decided to keep")
+    p.add_argument("--keep", choices=sorted(FORMATS), default="dng",
+                   help="the format you decided to keep (default: dng)")
     p.add_argument("--dry-run", action="store_true")
 
     args = parser.parse_args(argv)
@@ -970,6 +1019,13 @@ def main(argv=None) -> int:
                              force_render=args.render, quiet=args.quiet,
                              batch_size=args.batch_size)
         return 1 if counts["failed"] else 0
+    if args.command == "process":
+        _require_engine(args.fmt)
+        return cmd_process(args.folder, args.fmt, quality=args.quality,
+                           sample=args.sample, output_root=args.output,
+                           recurse=not args.no_recurse,
+                           force_render=args.render, quiet=args.quiet,
+                           batch_size=args.batch_size, dry_run=args.dry_run)
     if args.command == "compare":
         results = cmd_compare(args.file, quality=args.quality)
         return 0 if results else 1
