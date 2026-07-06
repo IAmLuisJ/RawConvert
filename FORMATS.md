@@ -60,8 +60,12 @@ for good.** That's the real price, not the megabytes.
 - **What it is:** Adobe's RAW container with lossy compression applied to the
   sensor data. It is still a real RAW file: white balance is still
   unapplied, and editors like Lightroom treat it exactly like a CR3.
-- **Size:** roughly 40–55% of the original — real savings, but far less than
-  JPEG/HEIC.
+- **Size:** estimated 5–55% of the original, varying strongly with camera
+  resolution and content — the higher the megapixel count, the bigger the
+  win. Real-world measurement: 45 MP Canon CR3s (~82 MB) converted to ~5 MB,
+  about **6% of the original** — *smaller than a typical JPEG of the same
+  photo*. Lower-resolution files land closer to the top of the range; run a
+  `--sample` batch on your own files to see where yours fall.
 - **What you keep:** most of the editing latitude. Highlight recovery, WB
   changes, and heavy tone edits still work. Metadata carries over.
 - **What you lose:** some shadow-recovery headroom and fine detail in the
@@ -78,7 +82,7 @@ for good.** That's the real price, not the megabytes.
 
 | | JPEG | HEIC | Lossy DNG |
 |---|---|---|---|
-| Typical size vs RAW | ~20–25% | ~8–15% | ~40–55% |
+| Typical size vs RAW (estimates) | ~20–25% | ~8–15% | ~5–55% (higher MP → smaller; 45 MP CR3s measured ~6%) |
 | Bit depth | 8-bit | 10-bit | RAW data |
 | Editing latitude | minimal | minimal (degrades nicer) | most retained |
 | Still a RAW file | no | no | **yes** |
@@ -96,11 +100,19 @@ seriously?**
   (best savings), or **JPEG** if maximum compatibility and
   future-proof-anywhere matters more than the extra space.
 - **"Maybe — some of these are portfolio/family-history keepers."**
-  Choose **lossy DNG** for those folders. Half the space, latitude kept.
-  It's the only choice you can't regret from an editing standpoint.
+  Choose **lossy DNG** for those folders. Latitude kept, and the savings can
+  be dramatic. It's the only choice you can't regret from an editing
+  standpoint.
 - **Mixed drive?** Mix formats. The tool works per-folder: DNG for the
   keeper folders, HEIC/JPEG for everything else. `status` shows the savings
   per format as you go.
+
+**Check DNG's actual ratio on your files before assuming it costs more
+space.** On high-megapixel cameras, lossy DNG can come out *smaller* than
+JPEG (measured ~6% of RAW on 45 MP CR3s) — in that case it wins on both
+axes at once: near-best compression *and* the files stay editable RAW. When
+`compare` or a `--sample` run shows DNG at or below JPEG's size, the only
+remaining reason to pick JPEG/HEIC is open-anywhere compatibility.
 
 Whatever you pick, run `compare` on a couple of representative photos first —
 one well-exposed, one tricky (backlit, high-contrast) — and pixel-peep the

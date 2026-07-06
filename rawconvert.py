@@ -299,9 +299,11 @@ def cmd_scan(root: Path, recurse: bool = True) -> int:
         count, size = by_ext[ext]
         print("  %s: %d files, %s" % (ext, count, human_size(size)))
     if files:
-        print("Estimated space after conversion: ~%s as JPEG/HEIC (~75%% saved),"
-              " ~%s as lossy DNG (~55%% saved)" %
-              (human_size(total * 0.25), human_size(total * 0.45)))
+        print("Estimated space after conversion:")
+        print("  jpeg/heic: ~%s  (~75%% saved)" % human_size(total * 0.25))
+        print("  lossy dng: ~%s - %s  (45%%-94%% saved; varies by camera —"
+              " high-megapixel CR3s measured near the top end)"
+              % (human_size(total * 0.06), human_size(total * 0.55)))
     return 0
 
 

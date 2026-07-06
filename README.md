@@ -10,8 +10,10 @@ One stdlib-only Python script; nothing to `pip install`.
 
 RAW → JPEG/HEIC is one-way. You permanently lose the RAW editing latitude
 (highlight recovery, white balance, etc.). Lossy DNG stays a RAW file
-(editable, ~50% smaller); JPEG/HEIC are smaller still (~75%) but "developed".
-Back up the drive before the final cleanup step if you can.
+(editable) and shrinks files an estimated 45–95% depending on the camera —
+real-world 45 MP CR3s measured at ~6% of original size, beating JPEG/HEIC
+while staying editable. JPEG/HEIC are "developed" but save a predictable
+~75–90%. Back up the drive before the final cleanup step if you can.
 
 **[FORMATS.md](FORMATS.md) explains the trade-offs in depth** — what each
 format keeps and loses, size expectations, compatibility, and how to decide.

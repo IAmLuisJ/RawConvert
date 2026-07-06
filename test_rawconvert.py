@@ -115,6 +115,10 @@ class TestScan(TempDirTestCase):
         _, out = capture(rawconvert.cmd_scan, self.root)
         self.assertIn("2 RAW files", out)
         self.assertIn("3.9 KB", out)  # 4000 bytes / 1024
+        # savings estimates shown as ranges, one line per target format
+        self.assertIn("jpeg/heic:", out)
+        self.assertIn("lossy dng:", out)
+        self.assertIn("45%-94% saved", out)
 
 
 def fake_engine_write(src, dst, *args, **kwargs):
