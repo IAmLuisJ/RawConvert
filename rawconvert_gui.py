@@ -322,8 +322,9 @@ def main(argv=None) -> int:
             return 0
         raise
     url = "http://127.0.0.1:%d/?token=%s" % (server.server_address[1], TOKEN)
-    print("RawConvert GUI running at %s" % url)
-    print("Keep this window open while you work. Press Ctrl+C to quit.")
+    print("RawConvert GUI running at %s" % url, flush=True)
+    print("Keep this window open while you work. Press Ctrl+C to quit.",
+          flush=True)
     if not args.no_browser:
         webbrowser.open(url)
     try:
