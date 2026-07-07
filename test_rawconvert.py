@@ -1,5 +1,6 @@
 """Tests for rawconvert.py — engines are faked; no external tools required."""
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -75,6 +76,26 @@ class TestManifest(TempDirTestCase):
         m = rawconvert.Manifest(self.root)
         with self.assertRaises(KeyError):
             m.set("a.CR2", "jpeg", bogus="x")
+
+
+class TestScanStats(TempDirTestCase):
+    def test_returns_structured_stats(self):
+        (self.root / "a.CR2").write_bytes(b"x" * 1000)
+        (self.root / "b.cr3").write_bytes(b"x" * 3000)
+        stats = rawconvert.scan_stats(self.root)
+        self.assertEqual(stats["files"], 2)
+        self.assertEqual(stats["total_bytes"], 4000)
+        self.assertEqual(stats["by_ext"][".cr2"]["count"], 1)
+        self.assertEqual(stats["by_ext"][".cr3"]["bytes"], 3000)
+        self.assertEqual(stats["est_jpeg_heic_bytes"], 1000)
+        self.assertEqual(stats["est_dng_low_bytes"], 240)
+        self.assertEqual(stats["est_dng_high_bytes"], 2200)
+
+    def test_no_recurse_respected(self):
+        (self.root / "sub").mkdir()
+        (self.root / "sub/a.CR2").write_bytes(b"x")
+        self.assertEqual(rawconvert.scan_stats(self.root,
+                                               recurse=False)["files"], 0)
 
 
 class TestEngines(TempDirTestCase):
@@ -661,6 +682,84 @@ class TestCompare(ConvertTestCase):
             capture(rawconvert.cmd_compare, self.root / "x.jpg",
                     out_dir=self.out_dir)
 
+
+
+class TestProgressJson(ConvertTestCase):
+    def events(self, out):
+        parsed = []
+        for line in out.splitlines():
+            try:
+                parsed.append(json.loads(line))
+            except ValueError:
+                pass  # human lines from verify/cleanup are ignored
+        return parsed
+
+    def test_convert_emits_json_events(self):
+        self.make_raws("a.CR2", "b.CR2")
+        counts, out = capture(rawconvert.cmd_convert, self.root, "heic",
+                              progress_json=True)
+        events = self.events(out)
+        types = [e["type"] for e in events]
+        self.assertEqual(types,
+                         ["start", "progress", "progress", "convert_summary"])
+        self.assertEqual(events[0]["total"], 2)
+        self.assertEqual(events[1]["source"], "a.CR2")
+        self.assertEqual(events[1]["index"], 1)
+        self.assertIn("out_bytes", events[1])
+        self.assertIn("eta_seconds", events[1])
+        self.assertEqual(events[-1]["converted"], 2)
+        # no human lines mixed in
+        self.assertEqual(len(events), len(out.strip().splitlines()))
+
+    def test_convert_failure_event_carries_code(self):
+        self.make_raws("a.CR2")
+        self.sips_convert.side_effect = rawconvert.EngineError("boom")
+        _, out = capture(rawconvert.cmd_convert, self.root, "heic",
+                         progress_json=True)
+        failed = [e for e in self.events(out) if e["type"] == "failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["source"], "a.CR2")
+        self.assertTrue(failed[0]["code"].startswith("RC"))
+        self.assertIn("diagnosis", failed[0])
+
+    def test_process_emits_steps_and_summary(self):
+        self.make_raws("a.CR2")
+
+        def fake_dims(path):
+            return (6000, 4000)
+        with mock.patch.object(rawconvert, "image_dimensions",
+                               side_effect=fake_dims):
+            rc, out = capture(rawconvert.cmd_process, self.root, "heic",
+                              progress_json=True)
+        self.assertEqual(rc, 0)
+        events = self.events(out)
+        steps = [e["name"] for e in events if e["type"] == "step"]
+        self.assertEqual(steps, ["convert", "verify", "cleanup"])
+        summary = [e for e in events if e["type"] == "summary"][-1]
+        self.assertEqual(summary["converted"], 1)
+        self.assertEqual(summary["verified"], 1)
+        self.assertEqual(summary["staged"], 1)
+        self.assertEqual(summary["failed"], 0)
+
+    def test_compare_emits_json_results(self):
+        self.make_raws("a.CR3")
+        with mock.patch.object(rawconvert, "open_in_preview"), \
+             mock.patch.object(rawconvert, "dng_converter",
+                               return_value=None), \
+             mock.patch.object(rawconvert, "have_exiftool",
+                               return_value=False):
+            results, out = capture(rawconvert.cmd_compare,
+                                   self.root / "a.CR3",
+                                   out_dir=self.root,
+                                   progress_json=True)
+        events = self.events(out)
+        rows = [e for e in events if e["type"] == "compare"]
+        self.assertEqual([r["format"] for r in rows], ["jpeg-rendered",
+                                                       "heic"])
+        self.assertIn("bytes", rows[0])
+        self.assertIn("ratio", rows[0])
+        skips = [e for e in events if e["type"] == "compare_skipped"]
+        self.assertTrue(any(s["format"] == "dng" for s in skips))
 
 
 class TestDngDefaults(TempDirTestCase):
