@@ -22,6 +22,9 @@ format keeps and loses, size expectations, compatibility, and how to decide.
 
 ## Download
 
+**Photographers: start at the [RawConvert page](https://iamluisj.github.io/RawConvert/)** —
+what it does, why it's safe, and a one-click download.
+
 1. Grab the latest `RawConvert-x.y.z.zip` from the
    [Releases page](../../releases) and unzip it anywhere (your Applications
    or Desktop folder is fine).
