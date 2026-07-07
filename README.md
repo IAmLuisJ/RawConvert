@@ -6,6 +6,8 @@ removed, and **no automatic deletion, ever**.
 
 One stdlib-only Python script; nothing to `pip install`.
 
+![The RawConvert wizard converting a folder of RAW photos](assets/RawConvertScreenshot.png)
+
 ## ⚠️ Understand the trade first
 
 RAW → JPEG/HEIC is one-way. You permanently lose the RAW editing latitude
