@@ -173,5 +173,42 @@ class TestJobLifecycle(GuiTestCase):
         self.assertEqual(status, 400)
 
 
+class TestQuitEndpoint(unittest.TestCase):
+    """Own server instance — quitting shuts it down."""
+
+    def test_quit_shuts_down_server(self):
+        server = rawconvert_gui.create_server(0)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        req = urllib.request.Request(
+            "http://127.0.0.1:%d/api/quit" % port, data=b"{}")
+        req.add_header("X-RawConvert-Token", rawconvert_gui.TOKEN)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(json.load(resp)["ok"], True)
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive(), "serve_forever should return")
+        server.server_close()
+
+
+class TestFrozenCliDispatch(unittest.TestCase):
+    def test_run_cli_env_dispatches_to_rawconvert_main(self):
+        with mock.patch.dict(rawconvert_gui.os.environ,
+                             {"RAWCONVERT_RUN_CLI": "1"}), \
+             mock.patch.object(rawconvert_gui.rawconvert, "main",
+                               return_value=7) as cli:
+            rc = rawconvert_gui.main(["doctor"])
+        self.assertEqual(rc, 7)
+        cli.assert_called_once_with(["doctor"])
+
+    def test_frozen_job_cmd_reinvokes_self(self):
+        with mock.patch.object(rawconvert_gui, "FROZEN", True):
+            cmd = rawconvert_gui.build_job_cmd("/photos",
+                                               {"format": "dng"})
+        self.assertEqual(cmd[0], sys.executable)
+        self.assertEqual(cmd[1], "process")
+        self.assertNotIn("rawconvert.py", " ".join(cmd))
+
+
 if __name__ == "__main__":
     unittest.main()

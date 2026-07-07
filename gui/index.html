@@ -69,6 +69,8 @@
   .step.done b::after { content: " ✓"; color: var(--sage); }
   .step small { display: block; text-transform: none; letter-spacing: 0;
                 font-size: .78rem; color: inherit; font-weight: 400; }
+  .ver { color: var(--ink-faint); font-size: .72rem; margin-top: 1.6rem;
+         font-variant-numeric: tabular-nums; }
 
   /* ---- content ---- */
   section { display: none; }
@@ -196,6 +198,8 @@
     <a class="step" data-step="4"><b>04</b>Settings<small>Pick a format</small></a>
     <a class="step" data-step="5"><b>05</b>Convert<small>The long part</small></a>
     <a class="step" data-step="6"><b>06</b>Review<small>You decide</small></a>
+    <p class="ver" id="ver"></p>
+    <button class="quiet" id="quitApp" style="padding:.2rem 0;font-size:.72rem">Quit RawConvert</button>
   </nav>
 
   <main>
@@ -366,6 +370,7 @@ function go(step) {
 /* -- 01 checkup -------------------------------------------------------- */
 async function checkup() {
   const d = await api("/api/doctor");
+  if (d.version) $("#ver").textContent = "v" + d.version;
   const rows = [
     [d.sips, "macOS image engine (sips)", "Built into every Mac."],
     [d.exiftool, "exiftool", d.exiftool ? "Metadata will be preserved in full."
@@ -511,6 +516,16 @@ async function finish(s) {
 $("#reveal").onclick = () => api("/api/reveal", { path: state.trashPath });
 $("#revealLog").onclick = () => api("/api/reveal", { path: state.errorLog });
 $("#again").onclick = () => { location.reload(); };
+$("#quitApp").onclick = async () => {
+  const s = await api("/api/job");
+  if (s.running && !confirm(
+      "A conversion is still running. Quit anyway? (Finished photos are" +
+      " kept — running Convert again resumes where it left off.)")) return;
+  try { await api("/api/quit", {}); } catch (e) { /* server went away */ }
+  document.body.innerHTML =
+    "<p style='padding:3rem;font-family:system-ui'>RawConvert has quit —" +
+    " you can close this tab.</p>";
+};
 
 /* -- boot ----------------------------------------------------------------- */
 (async function boot() {

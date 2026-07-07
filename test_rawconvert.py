@@ -98,6 +98,24 @@ class TestScanStats(TempDirTestCase):
                                                recurse=False)["files"], 0)
 
 
+class TestExiftoolPath(TempDirTestCase):
+    def test_env_override_wins(self):
+        stub = self.root / "exiftool"
+        stub.write_bytes(b"#!/bin/sh\n")
+        with mock.patch.dict(rawconvert.os.environ,
+                             {"RAWCONVERT_EXIFTOOL": str(stub)}):
+            self.assertEqual(rawconvert.exiftool_path(), str(stub))
+            self.assertTrue(rawconvert.have_exiftool())
+
+    def test_falls_back_to_which(self):
+        with mock.patch.dict(rawconvert.os.environ, {}, clear=False), \
+             mock.patch.object(rawconvert.shutil, "which",
+                               return_value="/usr/local/bin/exiftool"):
+            rawconvert.os.environ.pop("RAWCONVERT_EXIFTOOL", None)
+            self.assertEqual(rawconvert.exiftool_path(),
+                             "/usr/local/bin/exiftool")
+
+
 class TestEngines(TempDirTestCase):
     def test_image_dimensions_parses_sips_output(self):
         sips_out = b"/path/a.CR3\n  pixelWidth: 6000\n  pixelHeight: 4000\n"
@@ -119,6 +137,14 @@ class TestDoctor(unittest.TestCase):
         self.assertIn("exiftool.org", out)
         self.assertIn("adobe", out.lower())
         self.assertIn("sips", out)
+
+    def test_reports_version(self):
+        with mock.patch.object(rawconvert, "have_exiftool",
+                               return_value=True), \
+             mock.patch.object(rawconvert, "dng_converter",
+                               return_value="/Applications/x"):
+            _, out = capture(rawconvert.cmd_doctor)
+        self.assertIn(rawconvert.__version__, out)
 
     def test_reports_present_tools(self):
         with mock.patch.object(rawconvert, "have_exiftool", return_value=True), \

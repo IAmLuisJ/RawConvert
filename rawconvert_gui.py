@@ -11,6 +11,7 @@ _rawconvert_trash/ are reviewed and emptied by a human, in Finder.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import subprocess
 import sys
@@ -23,16 +24,32 @@ from pathlib import Path
 import rawconvert
 
 BASE_DIR = Path(__file__).resolve().parent
-INDEX_HTML = BASE_DIR / "gui" / "index.html"
+FROZEN = bool(getattr(sys, "frozen", False))  # True inside the built .app
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", BASE_DIR)) if FROZEN else BASE_DIR
+INDEX_HTML = RESOURCE_DIR / "gui" / "index.html"
 DEFAULT_PORT = 8765
 TOKEN = secrets.token_hex(16)
 EVENT_RING = 50  # most recent progress events kept for the UI feed
 
+# The bundled .app ships its own exiftool (see packaging/APP_NOTES.md)
+_bundled_exiftool = RESOURCE_DIR / "vendor" / "exiftool"
+if FROZEN and _bundled_exiftool.exists():
+    os.environ.setdefault("RAWCONVERT_EXIFTOOL", str(_bundled_exiftool))
+
 
 def build_job_cmd(folder: str, options: dict) -> list:
-    """CLI invocation for a conversion job (patched in tests)."""
-    cmd = [sys.executable, str(BASE_DIR / "rawconvert.py"), "process",
-           folder, "--to", options.get("format", "dng"), "--progress-json"]
+    """CLI invocation for a conversion job (patched in tests).
+
+    In the frozen .app there is no python interpreter or rawconvert.py on
+    disk — the app re-executes itself with RAWCONVERT_RUN_CLI=1 (handled at
+    the top of main()) so the same binary serves as the CLI subprocess.
+    """
+    if FROZEN:
+        cmd = [sys.executable, "process", folder]
+    else:
+        cmd = [sys.executable, str(BASE_DIR / "rawconvert.py"), "process",
+               folder]
+    cmd += ["--to", options.get("format", "dng"), "--progress-json"]
     if options.get("quality"):
         cmd += ["--quality", str(int(options["quality"]))]
     if options.get("sample"):
@@ -64,9 +81,11 @@ class JobManager:
                 "events": [], "failures": [], "summary": None,
                 "cancelled": False, "returncode": None,
             }
+            env = dict(os.environ, RAWCONVERT_RUN_CLI="1") if FROZEN else None
             self.proc = subprocess.Popen(
                 build_job_cmd(folder, options),
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                env=env)
         threading.Thread(target=self._reader, daemon=True).start()
         return True
 
@@ -129,6 +148,7 @@ def pick_folder() -> str:
 
 def doctor_report() -> dict:
     return {
+        "version": rawconvert.__version__,
         "sips": rawconvert.have_sips(),
         "exiftool": rawconvert.have_exiftool(),
         "exiftool_url": rawconvert.EXIFTOOL_URL,
@@ -274,6 +294,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"cancelled": JOBS.cancel(),
                         "note": "Already-converted files are kept; running"
                                 " Convert again resumes where it left off."})
+        elif route == "/api/quit":
+            self._json({"ok": True})
+            threading.Thread(target=self.server.shutdown,
+                             daemon=True).start()
         elif route == "/api/reveal":
             target = Path(self._body().get("path", ""))
             if not target.exists():
@@ -306,6 +330,9 @@ def already_running(port: int) -> bool:
 
 
 def main(argv=None) -> int:
+    # Frozen .app re-invokes itself as the CLI for conversion jobs
+    if os.environ.get("RAWCONVERT_RUN_CLI"):
+        return rawconvert.main(sys.argv[1:] if argv is None else argv)
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)

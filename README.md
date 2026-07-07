@@ -18,6 +18,21 @@ while staying editable. JPEG/HEIC are "developed" but save a predictable
 **[FORMATS.md](FORMATS.md) explains the trade-offs in depth** — what each
 format keeps and loses, size expectations, compatibility, and how to decide.
 
+## Download
+
+1. Grab the latest `RawConvert-x.y.z.zip` from the
+   [Releases page](../../releases) and unzip it anywhere (your Applications
+   or Desktop folder is fine).
+2. **Right-click `RawConvert.command` and choose Open**, then click **Open**
+   in the dialog. macOS shows a caution message for anything downloaded
+   outside the App Store — this one-time step tells it you trust the app.
+   After that, a normal double-click works.
+3. Your browser opens with the RawConvert wizard. Follow the six steps —
+   nothing is ever deleted; originals are set aside for *you* to review.
+
+On a brand-new Mac, the first launch may offer to install Apple's free
+"Command Line Tools" — click Install, let it finish, and launch again.
+
 ## GUI for non-technical users
 
 Double-click **`RawConvert.command`** — a local page opens in your browser

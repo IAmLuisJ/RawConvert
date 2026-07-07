@@ -22,6 +22,8 @@ import tempfile
 import time
 from pathlib import Path
 
+__version__ = "1.0.0"
+
 RAW_EXTS = {".cr2", ".cr3"}
 FORMATS = {"jpeg": ".jpg", "heic": ".heic", "dng": ".dng"}
 TRASH_DIRNAME = "_rawconvert_trash"
@@ -126,8 +128,17 @@ def have_sips() -> bool:
     return shutil.which("sips") is not None
 
 
+def exiftool_path():
+    """Path to exiftool: RAWCONVERT_EXIFTOOL override (used by the bundled
+    .app) first, then PATH lookup. None when unavailable."""
+    override = os.environ.get("RAWCONVERT_EXIFTOOL")
+    if override and os.path.exists(override):
+        return override
+    return shutil.which("exiftool")
+
+
 def have_exiftool() -> bool:
-    return shutil.which("exiftool") is not None
+    return exiftool_path() is not None
 
 
 def dng_converter():
@@ -150,8 +161,8 @@ def image_dimensions(path: Path):
         if width and height:
             return (width, height)
     if have_exiftool():
-        rc, out, _ = run(["exiftool", "-s3", "-ImageWidth", "-ImageHeight",
-                          str(path)])
+        rc, out, _ = run([exiftool_path(), "-s3", "-ImageWidth",
+                          "-ImageHeight", str(path)])
         parts = out.decode(errors="replace").split()
         if rc == 0 and len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
             return (int(parts[0]), int(parts[1]))
@@ -169,7 +180,7 @@ def extract_embedded_jpeg(src: Path, dst: Path) -> bool:
         return False
     src_dims = image_dimensions(src)
     for tag in ("-JpgFromRaw", "-PreviewImage"):
-        rc, out, _ = run(["exiftool", "-b", tag, str(src)])
+        rc, out, _ = run([exiftool_path(), "-b", tag, str(src)])
         if rc != 0 or not out:
             continue
         dst.write_bytes(out)
@@ -226,7 +237,7 @@ def copy_metadata(src: Path, dst: Path) -> None:
     """Copy EXIF/GPS/date tags from the RAW to the output (needs exiftool)."""
     if not have_exiftool():
         return
-    run(["exiftool", "-overwrite_original", "-quiet",
+    run([exiftool_path(), "-overwrite_original", "-quiet",
          "-TagsFromFile", str(src),
          "-all:all", "--previewimage", "--jpgfromraw", "--thumbnailimage",
          str(dst)])
@@ -253,8 +264,8 @@ def human_size(nbytes: float) -> str:
 
 def cmd_doctor() -> int:
     """Report tool availability per output format. Returns 0 if sips is OK."""
-    print("rawconvert doctor — %s, Python %s" %
-          (sys.platform, sys.version.split()[0]))
+    print("rawconvert %s doctor — %s, Python %s" %
+          (__version__, sys.platform, sys.version.split()[0]))
     print()
     sips_ok = have_sips()
     exif_ok = have_exiftool()

@@ -1,8 +1,11 @@
-# Local working files
-
 # Python
 __pycache__/
 *.pyc
+
+# Build artifacts
+dist/
+build/
+*.spec
 
 # macOS
 .DS_Store
