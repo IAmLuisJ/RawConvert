@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RawConvert</title>
+<style>
+  :root {
+    --paper: oklch(0.975 0.008 85);
+    --paper-deep: oklch(0.945 0.012 85);
+    --ink: oklch(0.24 0.015 75);
+    --ink-soft: oklch(0.45 0.02 75);
+    --ink-faint: oklch(0.62 0.015 75);
+    --line: oklch(0.88 0.012 85);
+    --amber: oklch(0.60 0.13 55);
+    --amber-deep: oklch(0.52 0.13 50);
+    --sage: oklch(0.55 0.09 150);
+    --alert: oklch(0.55 0.16 25);
+    --frame: 2px solid var(--ink);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.55 system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .shell {
+    display: grid;
+    grid-template-columns: 200px minmax(0, 640px);
+    gap: clamp(2rem, 6vw, 5rem);
+    max-width: 960px;
+    margin: 0 auto;
+    padding: clamp(2rem, 6vh, 4.5rem) 2rem 4rem;
+  }
+  @media (max-width: 760px) {
+    .shell { grid-template-columns: 1fr; gap: 1.5rem; }
+    nav.rail { display: flex; overflow-x: auto; border-left: 0 !important;
+               border-top: var(--frame); padding: .75rem 0 0 !important; }
+    nav.rail .step { border: 0 !important; padding: .25rem .9rem .25rem 0 !important; }
+    nav.rail .step small { display: none; }
+  }
+
+  /* ---- left rail: contact-sheet frame numbers ---- */
+  nav.rail {
+    border-left: var(--frame);
+    padding-left: 1.1rem;
+    align-self: start;
+    position: sticky; top: 3rem;
+  }
+  .brand {
+    font-family: ui-serif, "New York", Georgia, serif;
+    font-size: 1.35rem; font-weight: 600; letter-spacing: .01em;
+    margin: 0 0 1.6rem;
+  }
+  .brand em { font-style: normal; color: var(--amber); }
+  .step {
+    display: block; padding: .45rem 0;
+    color: var(--ink-faint); text-decoration: none;
+    font-size: .8rem; letter-spacing: .12em; text-transform: uppercase;
+  }
+  .step b { font-variant-numeric: tabular-nums; margin-right: .55em;
+            font-weight: 600; }
+  .step.now { color: var(--ink); }
+  .step.now b { color: var(--amber); }
+  .step.done { color: var(--ink-soft); }
+  .step.done b::after { content: " ✓"; color: var(--sage); }
+  .step small { display: block; text-transform: none; letter-spacing: 0;
+                font-size: .78rem; color: inherit; font-weight: 400; }
+
+  /* ---- content ---- */
+  section { display: none; }
+  section.now { display: block; animation: rise .45s cubic-bezier(.16,1,.3,1); }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+  h1 {
+    font-family: ui-serif, "New York", Georgia, serif;
+    font-size: clamp(1.7rem, 3.5vw, 2.3rem);
+    line-height: 1.15; font-weight: 600; margin: 0 0 .5rem;
+  }
+  .lede { color: var(--ink-soft); margin: 0 0 2rem; max-width: 46ch; }
+
+  button {
+    font: inherit; cursor: pointer; border-radius: 6px;
+    padding: .6rem 1.15rem; border: var(--frame);
+    background: var(--ink); color: var(--paper);
+    transition: transform .12s ease, background .12s ease;
+  }
+  button:hover { background: var(--amber-deep); border-color: var(--amber-deep); }
+  button:active { transform: translateY(1px); }
+  button.ghost { background: transparent; color: var(--ink);
+                 border: 1px solid var(--line); }
+  button.ghost:hover { border-color: var(--ink); background: transparent; }
+  button.quiet { background: none; border: none; color: var(--ink-soft);
+                 text-decoration: underline; padding: .6rem .4rem; }
+  button.quiet:hover { color: var(--ink); background: none; }
+  button:disabled { opacity: .45; cursor: default; }
+  .actions { display: flex; gap: .9rem; align-items: center; margin-top: 2.2rem; }
+
+  /* checkup rows */
+  .check { display: flex; gap: .8rem; padding: .8rem 0;
+           border-bottom: 1px solid var(--line); align-items: baseline; }
+  .check .mark { font-weight: 700; width: 1.2em; }
+  .check.ok .mark { color: var(--sage); }
+  .check.bad .mark { color: var(--alert); }
+  .check .what { flex: 1; }
+  .check .what small { display: block; color: var(--ink-soft); }
+  .check a { color: var(--amber-deep); }
+
+  /* folder + numbers */
+  .figures { margin: 2rem 0 0; }
+  .figures .big {
+    font-family: ui-serif, "New York", Georgia, serif;
+    font-size: clamp(2.2rem, 5vw, 3.2rem); font-weight: 600; line-height: 1.1;
+  }
+  .figures .big span { color: var(--amber); }
+  .figures p { color: var(--ink-soft); margin: .4rem 0 0; }
+  .path { font-size: .85rem; color: var(--ink-faint); word-break: break-all;
+          margin-top: 1rem; }
+
+  /* compare table */
+  table { border-collapse: collapse; width: 100%; margin-top: 1.4rem; }
+  th, td { text-align: left; padding: .55rem .2rem;
+           border-bottom: 1px solid var(--line); }
+  th { font-size: .75rem; letter-spacing: .1em; text-transform: uppercase;
+       color: var(--ink-faint); font-weight: 600; }
+  td.num { font-variant-numeric: tabular-nums; }
+  tr.winner td { color: var(--amber-deep); font-weight: 600; }
+  .aside-note { font-size: .85rem; color: var(--ink-soft); margin-top: 1rem; }
+
+  /* settings */
+  .fmt { display: block; border: 1px solid var(--line); border-radius: 8px;
+         padding: .9rem 1rem; margin-bottom: .7rem; cursor: pointer; }
+  .fmt:has(input:checked) { border: var(--frame); background: var(--paper-deep); }
+  .fmt input { margin-right: .6rem; accent-color: var(--amber-deep); }
+  .fmt small { display: block; color: var(--ink-soft); margin-top: .15rem;
+               margin-left: 1.7rem; }
+  details { margin-top: 1.4rem; }
+  summary { cursor: pointer; color: var(--ink-soft); }
+  details .row { display: flex; gap: 1rem; align-items: center;
+                 padding: .7rem 0; border-bottom: 1px solid var(--line); }
+  details label { flex: 1; }
+  details input[type=number] { width: 5.5rem; font: inherit; padding: .3rem; }
+  details input[type=range] { accent-color: var(--amber-deep); }
+
+  /* progress: film strip */
+  .strip {
+    height: 34px; border: var(--frame); border-radius: 4px;
+    background:
+      repeating-linear-gradient(90deg,
+        transparent 0 14px, var(--paper) 14px 18px),
+      var(--paper-deep);
+    position: relative; overflow: hidden; margin: 1.8rem 0 .8rem;
+  }
+  .strip .fill {
+    position: absolute; inset: 0; width: 0%;
+    background:
+      repeating-linear-gradient(90deg,
+        transparent 0 14px, var(--paper) 14px 18px),
+      var(--amber);
+    transition: width .6s cubic-bezier(.16,1,.3,1);
+  }
+  .strip-meta { display: flex; justify-content: space-between;
+                font-variant-numeric: tabular-nums; color: var(--ink-soft);
+                font-size: .9rem; }
+  .current { font-size: .85rem; color: var(--ink-faint); margin-top: .3rem;
+             min-height: 1.3em; }
+  .fails { margin-top: 1.6rem; }
+  .fails h3 { font-size: .8rem; letter-spacing: .1em; text-transform: uppercase;
+              color: var(--alert); margin: 0 0 .4rem; }
+  .fails ul { margin: 0; padding-left: 1.1rem; font-size: .88rem;
+              color: var(--ink-soft); }
+
+  /* finish */
+  .tally { display: flex; gap: 2.5rem; margin: 1.8rem 0; flex-wrap: wrap; }
+  .tally div b { display: block;
+    font-family: ui-serif, "New York", Georgia, serif;
+    font-size: 2rem; font-weight: 600; }
+  .tally div span { font-size: .8rem; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--ink-faint); }
+  .vow {
+    border-left: 3px solid var(--sage); padding: .2rem 0 .2rem 1rem;
+    color: var(--ink-soft); margin: 1.8rem 0; max-width: 48ch;
+  }
+  .notice { color: var(--alert); }
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav class="rail">
+    <p class="brand">Raw<em>Convert</em></p>
+    <a class="step" data-step="1"><b>01</b>Checkup<small>Tools ready?</small></a>
+    <a class="step" data-step="2"><b>02</b>Folder<small>What's inside</small></a>
+    <a class="step" data-step="3"><b>03</b>Compare<small>Try one photo</small></a>
+    <a class="step" data-step="4"><b>04</b>Settings<small>Pick a format</small></a>
+    <a class="step" data-step="5"><b>05</b>Convert<small>The long part</small></a>
+    <a class="step" data-step="6"><b>06</b>Review<small>You decide</small></a>
+  </nav>
+
+  <main>
+    <!-- 01 CHECKUP -->
+    <section data-step="1">
+      <h1>First, a quick checkup.</h1>
+      <p class="lede">RawConvert shrinks RAW photos to a fraction of their
+        size. Before anything else, let's make sure this Mac has the tools
+        it needs. Nothing is ever deleted by this app — you stay in charge
+        of that, always.</p>
+      <div id="checks"></div>
+      <div class="actions">
+        <button id="toFolder">Choose a folder →</button>
+        <button class="quiet" id="recheck">Re-check tools</button>
+      </div>
+    </section>
+
+    <!-- 02 FOLDER -->
+    <section data-step="2">
+      <h1>Which photos?</h1>
+      <p class="lede">Pick the folder of RAW photos (subfolders are
+        included). We'll only look for now — nothing changes yet.</p>
+      <button id="pick">Choose folder…</button>
+      <div class="figures" id="figures" hidden>
+        <div class="big"><span id="nfiles"></span> photos · <span id="nsize"></span></div>
+        <p id="estimate"></p>
+        <p class="path" id="chosenPath"></p>
+      </div>
+      <div class="actions" id="folderNext" hidden>
+        <button id="toCompare">Next: try one photo →</button>
+        <button class="quiet" id="skipCompare">Skip to settings</button>
+      </div>
+    </section>
+
+    <!-- 03 COMPARE -->
+    <section data-step="3">
+      <h1>See it with your own eyes.</h1>
+      <p class="lede">We'll convert one photo to every format and open the
+        results in Preview so you can zoom in and judge the quality
+        yourself. Sizes show up here.</p>
+      <button id="runCompare">Convert one photo</button>
+      <div id="compareOut"></div>
+      <div class="actions">
+        <button id="toSettings">Next: settings →</button>
+      </div>
+    </section>
+
+    <!-- 04 SETTINGS -->
+    <section data-step="4">
+      <h1>How should they be kept?</h1>
+      <p class="lede">DNG is the recommended choice: it stays an editable
+        RAW file and, on modern cameras, ends up smaller than a JPEG.</p>
+      <label class="fmt"><input type="radio" name="fmt" value="dng" checked>
+        <b>DNG</b> — recommended
+        <small>Still a RAW photo — fully editable later. Usually the
+          smallest, too.</small></label>
+      <label class="fmt"><input type="radio" name="fmt" value="heic">
+        <b>HEIC</b>
+        <small>The iPhone photo format. Very small, looks great, but no
+          longer editable as RAW.</small></label>
+      <label class="fmt"><input type="radio" name="fmt" value="jpeg">
+        <b>JPEG</b>
+        <small>Opens absolutely anywhere. Bigger than HEIC, and no longer
+          editable as RAW.</small></label>
+      <details>
+        <summary>Advanced options</summary>
+        <div class="row"><label>Quality (JPEG &amp; HEIC only)</label>
+          <input type="range" id="quality" min="60" max="100" value="90">
+          <output id="qout">90</output></div>
+        <div class="row"><label>Trial run: only convert the first…</label>
+          <input type="number" id="sample" min="1" placeholder="all"> files</div>
+        <div class="row"><label>Save converted files to a different drive</label>
+          <button class="ghost" id="pickOut">Choose…</button>
+          <span id="outPath" class="path"></span></div>
+      </details>
+      <div class="actions">
+        <button id="toConvert">Start converting →</button>
+      </div>
+    </section>
+
+    <!-- 05 CONVERT -->
+    <section data-step="5">
+      <h1 id="convTitle">Converting…</h1>
+      <p class="lede">This can take a while for big folders. You can leave
+        it running — or cancel anytime. Finished photos are kept, and
+        running it again picks up right where it stopped.</p>
+      <div class="strip"><div class="fill" id="fill"></div></div>
+      <div class="strip-meta"><span id="counter">–</span><span id="eta"></span></div>
+      <p class="current" id="current"></p>
+      <div class="fails" id="fails" hidden>
+        <h3>Skipped files</h3>
+        <ul id="failList"></ul>
+        <p class="aside-note">These photos were left exactly as they were.
+          Details are in the error log (next screen).</p>
+      </div>
+      <div class="actions">
+        <button class="ghost" id="cancel">Cancel — safe to resume later</button>
+      </div>
+    </section>
+
+    <!-- 06 REVIEW -->
+    <section data-step="6">
+      <h1 id="doneTitle">Done.</h1>
+      <div class="tally">
+        <div><b id="tConverted">0</b><span>converted</span></div>
+        <div><b id="tVerified">0</b><span>double-checked</span></div>
+        <div><b id="tStaged">0</b><span>originals set aside</span></div>
+        <div><b id="tFailed" >0</b><span>skipped</span></div>
+      </div>
+      <p class="vow">Your original photos were <b>not deleted</b>. They were
+        moved into a folder called <code>_rawconvert_trash</code>
+        (<span id="trashSize">…</span>). Look through it, and when you're
+        confident everything converted well, delete that folder yourself.
+        That final step belongs to a human.</p>
+      <div class="actions">
+        <button id="reveal">Show set-aside originals in Finder</button>
+        <button class="ghost" id="revealLog" hidden>Open error log</button>
+        <button class="quiet" id="again">Convert another folder</button>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+"use strict";
+const token = new URLSearchParams(location.search).get("token");
+const $ = (sel) => document.querySelector(sel);
+const state = { folder: null, output: null, summary: null, errorLog: null };
+
+async function api(path, body) {
+  const opts = { headers: { "X-RawConvert-Token": token } };
+  if (body !== undefined) {
+    opts.method = "POST";
+    opts.body = JSON.stringify(body);
+  }
+  const resp = await fetch(path, opts);
+  const data = await resp.json();
+  if (!resp.ok) throw Object.assign(new Error(data.error || resp.status),
+                                    { status: resp.status });
+  return data;
+}
+
+function human(bytes) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+  return bytes.toFixed(bytes >= 100 || i === 0 ? 0 : 1) + " " + units[i];
+}
+function humanEta(s) {
+  if (s == null) return "";
+  if (s < 90) return "about " + Math.max(1, Math.round(s)) + "s left";
+  if (s < 5400) return "about " + Math.round(s / 60) + " min left";
+  return "about " + (s / 3600).toFixed(1) + " h left";
+}
+
+let current = 1;
+function go(step) {
+  current = step;
+  document.querySelectorAll("section").forEach((sec) =>
+    sec.classList.toggle("now", +sec.dataset.step === step));
+  document.querySelectorAll(".rail .step").forEach((el) => {
+    const n = +el.dataset.step;
+    el.classList.toggle("now", n === step);
+    el.classList.toggle("done", n < step);
+  });
+}
+
+/* -- 01 checkup -------------------------------------------------------- */
+async function checkup() {
+  const d = await api("/api/doctor");
+  const rows = [
+    [d.sips, "macOS image engine (sips)", "Built into every Mac."],
+    [d.exiftool, "exiftool", d.exiftool ? "Metadata will be preserved in full."
+      : `Optional but recommended — <a href="${d.exiftool_url}" target="_blank">install from exiftool.org</a>.`],
+    [d.dng_converter, "Adobe DNG Converter", d.dng_converter
+      ? "Ready for DNG, the recommended format."
+      : `Needed for DNG (the recommended format) — <a href="${d.dng_converter_url}" target="_blank">free download from Adobe</a>.`],
+  ];
+  $("#checks").innerHTML = rows.map(([ok, name, note]) =>
+    `<div class="check ${ok ? "ok" : "bad"}"><span class="mark">${ok ? "✓" : "✕"}</span>
+     <span class="what">${name}<small>${note}</small></span></div>`).join("");
+}
+$("#recheck").onclick = checkup;
+$("#toFolder").onclick = () => go(2);
+
+/* -- 02 folder ---------------------------------------------------------- */
+$("#pick").onclick = async () => {
+  const res = await api("/api/pick-folder", {});
+  if (res.cancelled) return;
+  state.folder = res.path;
+  const s = await api("/api/scan?folder=" + encodeURIComponent(res.path));
+  $("#nfiles").textContent = s.files.toLocaleString();
+  $("#nsize").textContent = human(s.total_bytes);
+  $("#estimate").textContent = s.files
+    ? `After converting, this could take as little as ` +
+      `${human(s.est_dng_low_bytes)} (DNG) or about ` +
+      `${human(s.est_jpeg_heic_bytes)} (JPEG/HEIC) — estimates only.`
+    : "No RAW photos found in that folder — try another one.";
+  $("#chosenPath").textContent = res.path;
+  $("#figures").hidden = false;
+  $("#folderNext").hidden = !s.files;
+};
+$("#toCompare").onclick = () => go(3);
+$("#skipCompare").onclick = () => go(4);
+
+/* -- 03 compare ---------------------------------------------------------- */
+$("#runCompare").onclick = async () => {
+  const btn = $("#runCompare");
+  btn.disabled = true; btn.textContent = "Converting one photo…";
+  try {
+    const res = await api("/api/compare", { folder: state.folder });
+    if (res.error) { $("#compareOut").textContent = res.error; return; }
+    const rows = res.events.filter((e) => e.type === "compare");
+    const skips = res.events.filter((e) => e.type === "compare_skipped");
+    const names = { "jpeg-embedded": "JPEG (camera's own)",
+                    "jpeg-rendered": "JPEG (re-rendered)",
+                    heic: "HEIC", dng: "DNG" };
+    const min = Math.min(...rows.map((r) => r.bytes));
+    $("#compareOut").innerHTML =
+      `<table><tr><th>Format</th><th>Size</th><th>vs original</th></tr>
+       <tr><td>Original (${res.source})</td>
+           <td class="num">${human(res.src_bytes)}</td><td class="num">100%</td></tr>` +
+      rows.map((r) => `<tr class="${r.bytes === min ? "winner" : ""}">
+        <td>${names[r.format] || r.format}</td>
+        <td class="num">${human(r.bytes)}</td>
+        <td class="num">${r.ratio}%</td></tr>`).join("") +
+      `</table>` +
+      (skips.length ? `<p class="aside-note">Not shown: ${skips.map((s) =>
+        `${names[s.format] || s.format} (${s.reason})`).join(", ")}.</p>` : "") +
+      `<p class="aside-note">The full-size images just opened in Preview —
+        flip through with the arrow keys and zoom to 100%.</p>`;
+  } finally {
+    btn.disabled = false; btn.textContent = "Run it again";
+  }
+};
+$("#toSettings").onclick = () => go(4);
+
+/* -- 04 settings --------------------------------------------------------- */
+$("#quality").oninput = () => { $("#qout").textContent = $("#quality").value; };
+$("#pickOut").onclick = async () => {
+  const res = await api("/api/pick-folder", {});
+  if (!res.cancelled) {
+    state.output = res.path;
+    $("#outPath").textContent = res.path;
+  }
+};
+$("#toConvert").onclick = async () => {
+  const options = {
+    format: document.querySelector("input[name=fmt]:checked").value,
+    quality: +$("#quality").value,
+  };
+  if ($("#sample").value) options.sample = +$("#sample").value;
+  if (state.output) options.output = state.output;
+  try {
+    await api("/api/job", { folder: state.folder, options });
+  } catch (err) {
+    if (err.status !== 409) { alert(err.message); return; }
+  }
+  go(5);
+  poll();
+};
+
+/* -- 05 convert ---------------------------------------------------------- */
+let pollTimer = null;
+async function poll() {
+  const s = await api("/api/job");
+  if (s.total) {
+    $("#fill").style.width = (100 * s.done / s.total).toFixed(1) + "%";
+    $("#counter").textContent =
+      `${s.done.toLocaleString()} of ${s.total.toLocaleString()}`;
+  }
+  $("#eta").textContent = s.running ? humanEta(s.eta_seconds) : "";
+  $("#current").textContent = s.current || "";
+  $("#convTitle").textContent =
+    { convert: "Converting…", verify: "Double-checking every file…",
+      cleanup: "Setting originals aside…", done: "Finishing up…",
+    }[s.step] || "Converting…";
+  if (s.failures && s.failures.length) {
+    $("#fails").hidden = false;
+    $("#failList").innerHTML = s.failures.map((f) =>
+      `<li><b>${f.source}</b> — ${f.diagnosis}</li>`).join("");
+  }
+  if (s.running) {
+    pollTimer = setTimeout(poll, 1000);
+  } else {
+    finish(s);
+  }
+}
+$("#cancel").onclick = async () => {
+  await api("/api/job/cancel", {});
+};
+
+/* -- 06 review ------------------------------------------------------------ */
+async function finish(s) {
+  clearTimeout(pollTimer);
+  const sum = s.summary || {};
+  state.errorLog = sum.error_log;
+  $("#tConverted").textContent = (sum.converted ?? s.done) || 0;
+  $("#tVerified").textContent = sum.verified ?? 0;
+  $("#tStaged").textContent = sum.staged ?? 0;
+  $("#tFailed").textContent = sum.failed ?? (s.failures || []).length;
+  $("#doneTitle").textContent = s.cancelled ? "Paused — nothing lost."
+    : (sum.failed ? "Done, with a few skips." : "Done.");
+  $("#revealLog").hidden = !(sum.failed && state.errorLog);
+  try {
+    const t = await api("/api/trash?folder=" + encodeURIComponent(state.folder));
+    $("#trashSize").textContent =
+      `${t.files.toLocaleString()} files, ${human(t.bytes)}`;
+    state.trashPath = t.path;
+  } catch (e) { $("#trashSize").textContent = "…"; }
+  go(6);
+}
+$("#reveal").onclick = () => api("/api/reveal", { path: state.trashPath });
+$("#revealLog").onclick = () => api("/api/reveal", { path: state.errorLog });
+$("#again").onclick = () => { location.reload(); };
+
+/* -- boot ----------------------------------------------------------------- */
+(async function boot() {
+  if (!token) {
+    document.body.innerHTML =
+      "<p style='padding:3rem;font-family:system-ui'>Missing session link — " +
+      "please open RawConvert by double-clicking <b>RawConvert.command</b>.</p>";
+    return;
+  }
+  go(1);
+  await checkup();
+  // if a job is already running (page reopened), jump straight to progress
+  const s = await api("/api/job");
+  if (s.running) { state.folder = s.folder; go(5); poll(); }
+})();
+</script>
+</body>
+</html>

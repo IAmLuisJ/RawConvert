@@ -18,6 +18,25 @@ while staying editable. JPEG/HEIC are "developed" but save a predictable
 **[FORMATS.md](FORMATS.md) explains the trade-offs in depth** — what each
 format keeps and loses, size expectations, compatibility, and how to decide.
 
+## GUI for non-technical users
+
+Double-click **`RawConvert.command`** — a local page opens in your browser
+and walks you through the whole flow: tool checkup → choose folder →
+compare formats on one photo → convert with live progress → review the
+set-aside originals in Finder. The GUI has **no way to delete photos**;
+like the CLI, it only stages originals into `_rawconvert_trash/` for you to
+review and empty yourself.
+
+Notes for first use:
+- If macOS blocks the double-click (a downloaded `.command` file),
+  right-click it and choose **Open** once.
+- On a brand-new Mac, the first `python3` run may prompt to install Apple's
+  Command Line Tools — accept and relaunch.
+- The page is served only to your own Mac (`127.0.0.1`) with a per-session
+  token; nothing is exposed to the network.
+- Keep the Terminal window it opens in the background; closing it stops the
+  app (a running conversion can always be resumed by starting again).
+
 ## Requirements
 
 | Tool | Needed for | Install |
