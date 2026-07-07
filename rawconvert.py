@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime
+import json
 import os
 import shutil
 import subprocess
@@ -282,28 +283,45 @@ def cmd_doctor() -> int:
     return 0 if sips_ok else 1
 
 
-def cmd_scan(root: Path, recurse: bool = True) -> int:
-    """Inventory RAW files: counts, sizes, and estimated savings."""
-    files = find_raw_files(root, recurse=recurse)
+def scan_stats(root: Path, recurse: bool = True) -> dict:
+    """Structured inventory of RAW files under root (no printing)."""
     total = 0
     by_ext = {}
+    files = find_raw_files(root, recurse=recurse)
     for path in files:
         size = path.stat().st_size
         total += size
-        ext = path.suffix.lower()
-        by_ext[ext] = (by_ext.get(ext, (0, 0))[0] + 1,
-                       by_ext.get(ext, (0, 0))[1] + size)
+        entry = by_ext.setdefault(path.suffix.lower(),
+                                  {"count": 0, "bytes": 0})
+        entry["count"] += 1
+        entry["bytes"] += size
+    return {
+        "files": len(files),
+        "total_bytes": total,
+        "by_ext": by_ext,
+        "est_jpeg_heic_bytes": int(total * 0.25),
+        "est_dng_low_bytes": int(total * 0.06),
+        "est_dng_high_bytes": int(total * 0.55),
+    }
+
+
+def cmd_scan(root: Path, recurse: bool = True) -> int:
+    """Inventory RAW files: counts, sizes, and estimated savings."""
+    stats = scan_stats(root, recurse=recurse)
     print("%d RAW files, %s total, under %s" %
-          (len(files), human_size(total), root))
-    for ext in sorted(by_ext):
-        count, size = by_ext[ext]
-        print("  %s: %d files, %s" % (ext, count, human_size(size)))
-    if files:
+          (stats["files"], human_size(stats["total_bytes"]), root))
+    for ext in sorted(stats["by_ext"]):
+        entry = stats["by_ext"][ext]
+        print("  %s: %d files, %s"
+              % (ext, entry["count"], human_size(entry["bytes"])))
+    if stats["files"]:
         print("Estimated space after conversion:")
-        print("  jpeg/heic: ~%s  (~75%% saved)" % human_size(total * 0.25))
+        print("  jpeg/heic: ~%s  (~75%% saved)"
+              % human_size(stats["est_jpeg_heic_bytes"]))
         print("  lossy dng: ~%s - %s  (45%%-94%% saved; varies by camera —"
               " high-megapixel CR3s measured near the top end)"
-              % (human_size(total * 0.06), human_size(total * 0.55)))
+              % (human_size(stats["est_dng_low_bytes"]),
+                 human_size(stats["est_dng_high_bytes"])))
     return 0
 
 
@@ -440,10 +458,16 @@ def _eta(elapsed: float, done: int, remaining: int) -> str:
 DNG_STAGING_DIRNAME = ".rawconvert_dng_staging"
 
 
+def _emit(obj) -> None:
+    """One machine-readable JSON event per line (used by the GUI)."""
+    print(json.dumps(obj), flush=True)
+
+
 def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
                 dry_run: bool = False, output_root=None,
                 recurse: bool = True, force_render: bool = False,
-                quiet: bool = False, batch_size: int = 1) -> dict:
+                quiet: bool = False, batch_size: int = 1,
+                progress_json: bool = False) -> dict:
     """Convert every RAW under root to fmt. Idempotent and resumable.
 
     With output_root, outputs mirror the source folder structure under that
@@ -464,9 +488,12 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
     pending = 0
     started = time.monotonic()
     use_batch = fmt == "dng" and batch_size > 1
-    if batch_size > 1 and fmt != "dng":
+    if batch_size > 1 and fmt != "dng" and not progress_json:
         print("Note: --batch-size applies to DNG only; ignored for %s." % fmt)
-    if not quiet and not dry_run:
+    if progress_json:
+        if not dry_run:
+            _emit({"type": "start", "total": len(files), "format": fmt})
+    elif not quiet and not dry_run:
         print("%d RAW files to process under %s" % (len(files), root),
               flush=True)
 
@@ -481,7 +508,16 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
                      engine=engine, status="converted", note="")
         counts["converted"] += 1
         pending += 1
-        if not quiet:
+        if progress_json:
+            out_bytes = dst.stat().st_size
+            src_size = src.stat().st_size
+            _emit({"type": "progress", "index": index, "total": len(files),
+                   "source": rel, "output": out_rel,
+                   "src_bytes": src_size, "out_bytes": out_bytes,
+                   "eta_seconds": int((time.monotonic() - started)
+                                      / counts["converted"]
+                                      * (len(files) - index))})
+        elif not quiet:
             out_bytes = dst.stat().st_size
             src_size = src.stat().st_size
             print("[%d/%d] %s -> %s  %s (%.0f%% of RAW)  ETA %s"
@@ -502,8 +538,12 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
                            % (info["code"], info["name"], message))[:300])
         counts["failed"] += 1
         pending += 1
-        print("FAILED [%s %s]: %s — %s"
-              % (info["code"], info["name"], rel, info["diagnosis"]))
+        if progress_json:
+            _emit({"type": "failed", "source": rel, "code": info["code"],
+                   "name": info["name"], "diagnosis": info["diagnosis"]})
+        else:
+            print("FAILED [%s %s]: %s — %s"
+                  % (info["code"], info["name"], rel, info["diagnosis"]))
 
     batch = []  # (index, src, rel, dst, out_rel); all share one dst.parent
 
@@ -543,8 +583,12 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
         if dst.exists() and (row is None or row["status"] == "collision"):
             # An output we did not create — never overwrite it.
             counts["collision"] += 1
-            print("COLLISION: %s already exists and was not created by"
-                  " rawconvert; skipping %s" % (dst, rel))
+            if progress_json:
+                _emit({"type": "collision", "source": rel,
+                       "output": str(dst)})
+            else:
+                print("COLLISION: %s already exists and was not created by"
+                      " rawconvert; skipping %s" % (dst, rel))
             if not dry_run:
                 manifest.set(rel, fmt, output_relpath=out_rel,
                              output_root=_root_field(out_base, root),
@@ -597,13 +641,17 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
         flush_batch()
     if not dry_run and pending:
         manifest.save()
-    print("convert --to %s: %d converted, %d skipped, %d failed,"
-          " %d collisions%s" %
-          (fmt, counts["converted"], counts["skipped"], counts["failed"],
-           counts["collision"], " (dry run)" if dry_run else ""))
-    if counts["failed"]:
-        print("Failure details and debug steps: %s"
-              % (root / ERROR_LOG_NAME))
+    if progress_json:
+        if not dry_run:
+            _emit(dict(counts, type="convert_summary"))
+    else:
+        print("convert --to %s: %d converted, %d skipped, %d failed,"
+              " %d collisions%s" %
+              (fmt, counts["converted"], counts["skipped"], counts["failed"],
+               counts["collision"], " (dry run)" if dry_run else ""))
+        if counts["failed"]:
+            print("Failure details and debug steps: %s"
+                  % (root / ERROR_LOG_NAME))
     return counts
 
 
@@ -764,46 +812,78 @@ def cmd_cleanup(root: Path, keep: str, dry_run: bool = False) -> dict:
 def cmd_process(root: Path, fmt: str, quality: int = 90, sample=None,
                 output_root=None, recurse: bool = True,
                 force_render: bool = False, quiet: bool = False,
-                batch_size: int = 1, dry_run: bool = False) -> int:
+                batch_size: int = 1, dry_run: bool = False,
+                progress_json: bool = False) -> int:
     """One-shot pipeline: scan, convert, verify, then stage cleanup.
 
     Only files whose outputs pass verification have their originals staged;
     failures keep their originals in place. Nothing is ever hard-deleted —
     the trash folder is still emptied manually.
     """
-    print("== Step 1/4: scan ==")
-    cmd_scan(root, recurse=recurse)
-    print("\n== Step 2/4: convert (--to %s) ==" % fmt)
+    if progress_json:
+        _emit({"type": "step", "name": "convert"})
+    else:
+        print("== Step 1/4: scan ==")
+        cmd_scan(root, recurse=recurse)
+        print("\n== Step 2/4: convert (--to %s) ==" % fmt)
     ccounts = cmd_convert(root, fmt, quality=quality, sample=sample,
                           dry_run=dry_run, output_root=output_root,
                           recurse=recurse, force_render=force_render,
-                          quiet=quiet, batch_size=batch_size)
+                          quiet=quiet, batch_size=batch_size,
+                          progress_json=progress_json)
     if dry_run:
-        print("\nDry run — nothing was written. Run without --dry-run for"
-              " the full pipeline.")
+        if not progress_json:
+            print("\nDry run — nothing was written. Run without --dry-run"
+                  " for the full pipeline.")
         return 0
-    print("\n== Step 3/4: verify ==")
-    vcounts = cmd_verify(root, fmt)
-    print("\n== Step 4/4: cleanup (stage originals) ==")
-    scounts = cmd_cleanup(root, fmt)
+    if progress_json:
+        _emit({"type": "step", "name": "verify"})
+        vcounts, _ = _swallow_stdout(cmd_verify, root, fmt)
+        _emit({"type": "step", "name": "cleanup"})
+        scounts, _ = _swallow_stdout(cmd_cleanup, root, fmt)
+    else:
+        print("\n== Step 3/4: verify ==")
+        vcounts = cmd_verify(root, fmt)
+        print("\n== Step 4/4: cleanup (stage originals) ==")
+        scounts = cmd_cleanup(root, fmt)
     failed = ccounts["failed"] + vcounts["failed"]
-    print("\nprocess complete: %d converted, %d verified, %d originals"
-          " staged, %d failed"
-          % (ccounts["converted"], vcounts["verified"],
-             scounts["originals_staged"], failed))
-    if failed:
-        print("Failed files kept their originals in place — details in %s"
-              % (root / ERROR_LOG_NAME))
-    print("Spot-check %s and delete it yourself when satisfied."
-          % (root / TRASH_DIRNAME))
+    if progress_json:
+        _emit({"type": "summary", "converted": ccounts["converted"],
+               "skipped": ccounts["skipped"],
+               "verified": vcounts["verified"],
+               "verify_failed": vcounts["failed"],
+               "staged": scounts["originals_staged"], "failed": failed,
+               "trash": str(root / TRASH_DIRNAME),
+               "error_log": str(root / ERROR_LOG_NAME)})
+    else:
+        print("\nprocess complete: %d converted, %d verified, %d originals"
+              " staged, %d failed"
+              % (ccounts["converted"], vcounts["verified"],
+                 scounts["originals_staged"], failed))
+        if failed:
+            print("Failed files kept their originals in place — details in"
+                  " %s" % (root / ERROR_LOG_NAME))
+        print("Spot-check %s and delete it yourself when satisfied."
+              % (root / TRASH_DIRNAME))
     return 1 if failed else 0
+
+
+def _swallow_stdout(func, *args, **kwargs):
+    """Run func with its stdout captured; returns (result, output_text)."""
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        result = func(*args, **kwargs)
+    return result, buf.getvalue()
 
 
 def open_in_preview(paths) -> None:
     run(["open", "-a", "Preview"] + [str(p) for p in paths])
 
 
-def cmd_compare(src: Path, quality: int = 90, out_dir=None) -> dict:
+def cmd_compare(src: Path, quality: int = 90, out_dir=None,
+                progress_json: bool = False) -> dict:
     """Convert one RAW to every available format/engine and open in Preview.
 
     JPEG is produced twice when possible — once from the camera's embedded
@@ -817,32 +897,58 @@ def cmd_compare(src: Path, quality: int = 90, out_dir=None) -> dict:
     if out_dir is None:
         out_dir = Path(tempfile.mkdtemp(prefix="rawconvert_compare_"))
     src_bytes = src.stat().st_size
-    print("Comparing formats for %s (%s)" % (src.name, human_size(src_bytes)))
     results = {}
+
+    def say(text):
+        if not progress_json:
+            print(text)
+
+    def skipped(key, reason):
+        if progress_json:
+            _emit({"type": "compare_skipped", "format": key,
+                   "reason": reason})
+
+    say("Comparing formats for %s (%s)" % (src.name, human_size(src_bytes)))
+    if progress_json:
+        _emit({"type": "compare_start", "source": src.name,
+               "src_bytes": src_bytes})
 
     def report(key, label, dst):
         copy_metadata(src, dst)
         out_bytes = dst.stat().st_size
         results[key] = dst
-        print("  %-24s %10s  %3.0f%% of RAW"
-              % (label, human_size(out_bytes),
-                 100.0 * out_bytes / src_bytes))
+        if progress_json:
+            _emit({"type": "compare", "format": key, "bytes": out_bytes,
+                   "ratio": round(100.0 * out_bytes / src_bytes, 1),
+                   "path": str(dst)})
+        else:
+            print("  %-24s %10s  %3.0f%% of RAW"
+                  % (label, human_size(out_bytes),
+                     100.0 * out_bytes / src_bytes))
+
+    def failed(key, label, exc):
+        if progress_json:
+            _emit({"type": "compare_failed", "format": key,
+                   "error": str(exc)})
+        else:
+            print("  %-24s FAILED — %s" % (label, exc))
 
     # JPEG, camera's embedded rendering (quality fixed at shoot time)
     label = "jpeg (camera-embedded):"
     if not have_exiftool():
-        print("  %-24s skipped — exiftool not installed (see: doctor)"
-              % label)
+        say("  %-24s skipped — exiftool not installed (see: doctor)" % label)
+        skipped("jpeg-embedded", "exiftool not installed")
     else:
         dst = out_dir / (src.stem + "_embedded.jpg")
         try:
             if extract_embedded_jpeg(src, dst):
                 report("jpeg-embedded", label, dst)
             else:
-                print("  %-24s skipped — no usable full-size embedded JPEG"
-                      % label)
+                say("  %-24s skipped — no usable full-size embedded JPEG"
+                    % label)
+                skipped("jpeg-embedded", "no usable embedded JPEG")
         except EngineError as exc:
-            print("  %-24s FAILED — %s" % (label, exc))
+            failed("jpeg-embedded", label, exc)
 
     # JPEG, Apple's RAW engine at the requested quality
     label = "jpeg (sips q%d):" % quality
@@ -851,7 +957,7 @@ def cmd_compare(src: Path, quality: int = 90, out_dir=None) -> dict:
         sips_convert(src, dst, "jpeg", quality)
         report("jpeg-rendered", label, dst)
     except EngineError as exc:
-        print("  %-24s FAILED — %s" % (label, exc))
+        failed("jpeg-rendered", label, exc)
 
     # HEIC (always rendered)
     label = "heic (sips q%d):" % quality
@@ -860,28 +966,29 @@ def cmd_compare(src: Path, quality: int = 90, out_dir=None) -> dict:
         sips_convert(src, dst, "heic", quality)
         report("heic", label, dst)
     except EngineError as exc:
-        print("  %-24s FAILED — %s" % (label, exc))
+        failed("heic", label, exc)
 
     # Lossy DNG
     label = "dng (lossy):"
     if dng_converter() is None:
-        print("  %-24s skipped — Adobe DNG Converter not installed"
-              " (see: doctor)" % label)
+        say("  %-24s skipped — Adobe DNG Converter not installed"
+            " (see: doctor)" % label)
+        skipped("dng", "Adobe DNG Converter not installed")
     else:
         dst = out_dir / (src.stem + ".dng")
         try:
             dng_convert(src, dst)
             report("dng", label, dst)
         except EngineError as exc:
-            print("  %-24s FAILED — %s" % (label, exc))
+            failed("dng", label, exc)
 
     if results:
-        print("Outputs kept in %s" % out_dir)
-        print("Opening %d files in Preview — flip through with arrow keys"
-              " and zoom to 100%% to judge quality." % len(results))
+        say("Outputs kept in %s" % out_dir)
+        say("Opening %d files in Preview — flip through with arrow keys"
+            " and zoom to 100%% to judge quality." % len(results))
         open_in_preview(sorted(results.values()))
     else:
-        print("Nothing to open — every conversion failed.")
+        say("Nothing to open — every conversion failed.")
     return results
 
 
@@ -970,6 +1077,9 @@ def main(argv=None) -> int:
                             " the final summary are still shown)")
         p.add_argument("--dry-run", action="store_true",
                        help="show what would happen without writing anything")
+        p.add_argument("--progress-json", action="store_true",
+                       help="machine-readable JSON progress output, one"
+                            " event per line (used by the GUI)")
 
     add_convert_options(sub.add_parser(
         "convert", help="convert RAW files (idempotent)"))
@@ -986,6 +1096,8 @@ def main(argv=None) -> int:
     p.add_argument("file", type=_existing_file, metavar="RAWFILE")
     p.add_argument("--quality", type=int, default=90,
                    help="JPEG/HEIC quality 1-100 (default 90)")
+    p.add_argument("--progress-json", action="store_true",
+                   help="machine-readable JSON output (used by the GUI)")
 
     p = sub.add_parser("verify", help="validate converted outputs")
     p.add_argument("folder", type=_folder)
@@ -1017,7 +1129,8 @@ def main(argv=None) -> int:
                              output_root=args.output,
                              recurse=not args.no_recurse,
                              force_render=args.render, quiet=args.quiet,
-                             batch_size=args.batch_size)
+                             batch_size=args.batch_size,
+                             progress_json=args.progress_json)
         return 1 if counts["failed"] else 0
     if args.command == "process":
         _require_engine(args.fmt)
@@ -1025,9 +1138,11 @@ def main(argv=None) -> int:
                            sample=args.sample, output_root=args.output,
                            recurse=not args.no_recurse,
                            force_render=args.render, quiet=args.quiet,
-                           batch_size=args.batch_size, dry_run=args.dry_run)
+                           batch_size=args.batch_size, dry_run=args.dry_run,
+                           progress_json=args.progress_json)
     if args.command == "compare":
-        results = cmd_compare(args.file, quality=args.quality)
+        results = cmd_compare(args.file, quality=args.quality,
+                              progress_json=args.progress_json)
         return 0 if results else 1
     if args.command == "verify":
         counts = cmd_verify(args.folder, args.fmt)
