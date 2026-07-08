@@ -923,6 +923,111 @@ class TestProcess(ConvertTestCase):
         self.assertFalse((self.root / rawconvert.TRASH_DIRNAME).exists())
 
 
+class TestSanitizeRel(unittest.TestCase):
+    def test_colon_and_trailing_space_components(self):
+        self.assertEqual(
+            rawconvert._sanitize_rel("Denver trip/Eliana:Family /IMG.CR2"),
+            "Denver trip/Eliana_Family/IMG.CR2")
+
+    def test_trailing_dots_and_empty(self):
+        self.assertEqual(rawconvert._sanitize_rel("a.../b"), "a/b")
+        self.assertEqual(rawconvert._sanitize_rel(":/f.CR2"), "_/f.CR2")
+
+
+class TestCleanupResilience(TempDirTestCase):
+    """Cleanup must never abort the batch on one un-movable file."""
+
+    def seed_verified(self, *rels):
+        for rel in rels:
+            src = self.root / rel
+            src.parent.mkdir(parents=True, exist_ok=True)
+            src.write_bytes(b"RAW")
+            out = src.with_suffix(".dng")
+            out.write_bytes(b"II*\x00data")
+        m = rawconvert.Manifest(self.root)
+        for rel in rels:
+            m.set(rel, "dng",
+                  output_relpath=str(Path(rel).with_suffix(".dng")),
+                  status="verified", src_bytes=3, out_bytes=8, engine="t")
+        m.save()
+
+    def test_blocked_file_is_logged_and_batch_continues(self):
+        self.seed_verified("a.CR2", "b.CR2")
+        real_replace = rawconvert.os.replace
+
+        def eperm_on_b(src, dst):
+            if "b.CR2" in str(src):
+                raise OSError(1, "Operation not permitted", str(src))
+            return real_replace(src, dst)
+
+        with mock.patch.object(rawconvert.os, "replace",
+                               side_effect=eperm_on_b):
+            counts, out = capture(rawconvert.cmd_cleanup, self.root, "dng")
+        self.assertEqual(counts["originals_staged"], 1)
+        self.assertEqual(counts["failed"], 1)
+        self.assertIn("FAILED", out)
+        # failed file keeps its manifest status → retryable after user fixes
+        m = rawconvert.Manifest(self.root)
+        m.load()
+        self.assertEqual(m.get("b.CR2", "dng")["status"], "verified")
+        self.assertEqual(m.get("a.CR2", "dng")["status"], "cleaned")
+        self.assertTrue((self.root / rawconvert.ERROR_LOG_NAME).exists())
+
+    def test_colon_folder_staged_under_sanitized_name(self):
+        # APFS allows ':' in POSIX names (Finder shows '/'); FAT-formatted
+        # drives reject creating them — simulate that FS behavior.
+        self.seed_verified("Eliana:Family /IMG_9068.CR2")
+        real_replace = rawconvert.os.replace
+
+        def fat_like(src, dst):
+            if ":" in str(dst):
+                raise OSError(1, "Operation not permitted", str(src))
+            return real_replace(src, dst)
+
+        with mock.patch.object(rawconvert.os, "replace",
+                               side_effect=fat_like):
+            counts, _ = capture(rawconvert.cmd_cleanup, self.root, "dng")
+        self.assertEqual(counts["originals_staged"], 1)
+        self.assertEqual(counts["failed"], 0)
+        staged = (self.root / rawconvert.TRASH_DIRNAME / "originals" /
+                  "Eliana_Family" / "IMG_9068.CR2")
+        self.assertTrue(staged.exists())
+        row = rawconvert.Manifest(self.root)
+        row.load()
+        note = row.get("Eliana:Family /IMG_9068.CR2", "dng")["note"]
+        self.assertIn("Eliana_Family", note)
+
+    def test_classify_illegal_name(self):
+        info = rawconvert.classify_failure(
+            Path("/Volumes/X/Eliana:Family /IMG.CR2"), 30_000_000,
+            "[Errno 1] Operation not permitted:"
+            " '/Volumes/X/Eliana:Family /IMG.CR2'")
+        self.assertEqual(info["code"], "RC07")
+
+    def test_locked_file_hint_in_rc06(self):
+        info = rawconvert.classify_failure(
+            Path("/Volumes/X/plain/IMG.CR2"), 30_000_000,
+            "[Errno 1] Operation not permitted: '/Volumes/X/plain/IMG.CR2'")
+        self.assertEqual(info["code"], "RC06")
+        self.assertTrue(any("Locked" in s for s in info["steps"]))
+
+
+class TestConvertMkdirResilience(ConvertTestCase):
+    def test_unwritable_destination_folder_is_per_file_failure(self):
+        self.make_raws("a.CR2", "b.CR2")
+
+        def explode_on_b(dst):
+            if "b" in dst.name:
+                raise OSError(1, "Operation not permitted", str(dst))
+
+        with mock.patch.object(rawconvert, "_make_parent",
+                               side_effect=explode_on_b):
+            counts, out = capture(rawconvert.cmd_convert, self.root, "heic")
+        self.assertEqual(counts["converted"], 1)
+        self.assertEqual(counts["failed"], 1)
+        self.assertIn("FAILED", out)
+
+
 class TestStatus(TempDirTestCase):
     def test_status_reports_per_format_sizes(self):
         m = rawconvert.Manifest(self.root)

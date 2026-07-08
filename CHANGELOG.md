@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.2 — 2026-07-08
+
+- Fixed a crash when setting aside originals from folders whose names
+  contain a Finder-typed "/" (stored as ":" on disk) on FAT/exFAT drives:
+  cleanup now stages those files under an adjusted folder name
+  (":" becomes "_") and records where they went.
+- One blocked file (locked, illegal name, permissions) no longer aborts
+  cleanup — it's logged with a fix suggestion and the batch continues;
+  re-running retries it.
+- New RC07 ILLEGAL_NAME error classification; RC06 now suggests checking
+  Finder's "Locked" flag.
+- Convert is equally resilient when a destination folder can't be created
+  (e.g. mirroring awkward names onto another drive with --output).
+
 ## 1.0.1 — 2026-07-07
 
 - Live progress during the verify and set-aside (cleanup) steps: the
