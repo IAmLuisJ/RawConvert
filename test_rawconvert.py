@@ -748,6 +748,68 @@ class TestProgressJson(ConvertTestCase):
         self.assertTrue(failed[0]["code"].startswith("RC"))
         self.assertIn("diagnosis", failed[0])
 
+    def test_verify_emits_progress_events(self):
+        self.make_raws("a.CR2", "b.CR2")
+        capture(rawconvert.cmd_convert, self.root, "heic")
+
+        def fake_dims(path):
+            return (6000, 4000)
+        with mock.patch.object(rawconvert, "image_dimensions",
+                               side_effect=fake_dims):
+            counts, out = capture(rawconvert.cmd_verify, self.root, "heic",
+                                  progress_json=True)
+        events = self.events(out)
+        start = [e for e in events if e["type"] == "start"][0]
+        self.assertEqual(start["total"], 2)
+        self.assertEqual(start["phase"], "verify")
+        progress = [e for e in events if e["type"] == "progress"]
+        self.assertEqual(len(progress), 2)
+        self.assertEqual(progress[0]["index"], 1)
+        self.assertEqual(progress[0]["phase"], "verify")
+        self.assertIn("eta_seconds", progress[0])
+
+    def test_verify_failure_event(self):
+        self.make_raws("a.CR2")
+        capture(rawconvert.cmd_convert, self.root, "heic")
+        (self.root / "a.heic").unlink()  # break the output
+        _, out = capture(rawconvert.cmd_verify, self.root, "heic",
+                         progress_json=True)
+        fails = [e for e in self.events(out)
+                 if e["type"] == "verify_failed"]
+        self.assertEqual(len(fails), 1)
+        self.assertEqual(fails[0]["source"], "a.CR2")
+        self.assertIn("missing", fails[0]["note"])
+
+    def test_cleanup_emits_progress_events(self):
+        self.make_raws("a.CR2", "b.CR2")
+        capture(rawconvert.cmd_convert, self.root, "heic")
+
+        def fake_dims(path):
+            return (6000, 4000)
+        with mock.patch.object(rawconvert, "image_dimensions",
+                               side_effect=fake_dims):
+            capture(rawconvert.cmd_verify, self.root, "heic")
+        counts, out = capture(rawconvert.cmd_cleanup, self.root, "heic",
+                              progress_json=True)
+        events = self.events(out)
+        start = [e for e in events if e["type"] == "start"][0]
+        self.assertEqual(start["phase"], "cleanup")
+        self.assertEqual(start["total"], 2)
+        progress = [e for e in events if e["type"] == "progress"]
+        self.assertEqual(len(progress), 2)
+
+    def test_verify_human_mode_prints_heartbeat(self):
+        self.make_raws(*["f%03d.CR2" % i for i in range(3)])
+        capture(rawconvert.cmd_convert, self.root, "heic")
+
+        def fake_dims(path):
+            return (6000, 4000)
+        with mock.patch.object(rawconvert, "VERIFY_HEARTBEAT_EVERY", 2), \
+             mock.patch.object(rawconvert, "image_dimensions",
+                               side_effect=fake_dims):
+            _, out = capture(rawconvert.cmd_verify, self.root, "heic")
+        self.assertIn("verified 2/3", out)
+
     def test_process_emits_steps_and_summary(self):
         self.make_raws("a.CR2")
 
@@ -761,6 +823,8 @@ class TestProgressJson(ConvertTestCase):
         events = self.events(out)
         steps = [e["name"] for e in events if e["type"] == "step"]
         self.assertEqual(steps, ["convert", "verify", "cleanup"])
+        phases = [e.get("phase") for e in events if e["type"] == "start"]
+        self.assertEqual(phases, ["convert", "verify", "cleanup"])
         summary = [e for e in events if e["type"] == "summary"][-1]
         self.assertEqual(summary["converted"], 1)
         self.assertEqual(summary["verified"], 1)

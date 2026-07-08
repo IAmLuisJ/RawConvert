@@ -107,7 +107,8 @@ class TestReadEndpoints(GuiTestCase):
 STUB_JOB = r"""
 import json, sys, time
 print(json.dumps({"type": "step", "name": "convert"}), flush=True)
-print(json.dumps({"type": "start", "total": 2, "format": "dng"}), flush=True)
+print(json.dumps({"type": "start", "total": 2, "format": "dng",
+                  "phase": "convert"}), flush=True)
 print(json.dumps({"type": "progress", "index": 1, "total": 2,
                   "source": "a.CR2", "output": "a.dng", "src_bytes": 100,
                   "out_bytes": 10, "eta_seconds": 1}), flush=True)
@@ -115,9 +116,17 @@ print("human noise line that must be ignored", flush=True)
 print(json.dumps({"type": "failed", "source": "b.CR2", "code": "RC03",
                   "name": "UNSUPPORTED_OR_CORRUPT",
                   "diagnosis": "test diagnosis"}), flush=True)
+print(json.dumps({"type": "step", "name": "verify"}), flush=True)
+print(json.dumps({"type": "start", "total": 1, "phase": "verify"}),
+      flush=True)
+print(json.dumps({"type": "progress", "index": 1, "total": 1,
+                  "source": "a.CR2", "phase": "verify",
+                  "eta_seconds": 0}), flush=True)
+print(json.dumps({"type": "verify_failed", "source": "a.CR2",
+                  "note": "dimension mismatch"}), flush=True)
 print(json.dumps({"type": "summary", "converted": 1, "skipped": 0,
-                  "verified": 1, "verify_failed": 0, "staged": 1,
-                  "failed": 1, "trash": "/t", "error_log": "/e"}), flush=True)
+                  "verified": 0, "verify_failed": 1, "staged": 0,
+                  "failed": 2, "trash": "/t", "error_log": "/e"}), flush=True)
 """
 
 STUB_SLEEPER = r"""
@@ -140,12 +149,17 @@ class TestJobLifecycle(GuiTestCase):
         self.assertEqual(status, 200)
         self.assertTrue(body["started"])
         state = self.wait_for_job_end()
-        self.assertEqual(state["total"], 2)
+        # each phase resets the bar; the last start was verify (total 1)
+        self.assertEqual(state["phase"], "verify")
+        self.assertEqual(state["total"], 1)
         self.assertEqual(state["done"], 1)
         self.assertEqual(state["step"], "done")
-        self.assertEqual(state["summary"]["staged"], 1)
-        self.assertEqual(len(state["failures"]), 1)
+        self.assertEqual(state["summary"]["verify_failed"], 1)
+        self.assertEqual(len(state["failures"]), 2)
         self.assertEqual(state["failures"][0]["code"], "RC03")
+        self.assertEqual(state["failures"][1]["code"], "VERIFY")
+        self.assertIn("dimension mismatch",
+                      state["failures"][1]["diagnosis"])
         self.assertEqual(state["returncode"], 0)
 
     def test_second_job_rejected_while_running(self):

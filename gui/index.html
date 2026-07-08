@@ -467,10 +467,15 @@ $("#toConvert").onclick = async () => {
 let pollTimer = null;
 async function poll() {
   const s = await api("/api/job");
+  const phaseWord = { convert: "converted", verify: "checked",
+                      cleanup: "set aside" }[s.phase] || "done";
   if (s.total) {
     $("#fill").style.width = (100 * s.done / s.total).toFixed(1) + "%";
     $("#counter").textContent =
-      `${s.done.toLocaleString()} of ${s.total.toLocaleString()}`;
+      `${s.done.toLocaleString()} of ${s.total.toLocaleString()} ${phaseWord}`;
+  } else {
+    $("#fill").style.width = "0%";
+    $("#counter").textContent = "starting…";
   }
   $("#eta").textContent = s.running ? humanEta(s.eta_seconds) : "";
   $("#current").textContent = s.current || "";
