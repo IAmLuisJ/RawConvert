@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.1 — 2026-07-07
+
+- Live progress during the verify and set-aside (cleanup) steps: the
+  progress bar now resets and fills for each phase, with counts, the
+  current file, and a time estimate — no more silent "Double-checking…"
+  on big folders.
+- Terminal `verify` prints a heartbeat with ETA every 200 files.
+- Verification failures appear in the wizard as they're found, with the
+  reassurance that the original was kept.
+
 ## 1.0.0 — 2026-07-07
 
 First public release.
