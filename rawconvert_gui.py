@@ -76,7 +76,8 @@ class JobManager:
             self.state = {
                 "running": True, "folder": folder,
                 "format": options.get("format", "dng"),
-                "step": "starting", "total": 0, "done": 0,
+                "step": "starting", "phase": "convert",
+                "total": 0, "done": 0,
                 "current": "", "eta_seconds": None,
                 "events": [], "failures": [], "summary": None,
                 "cancelled": False, "returncode": None,
@@ -108,7 +109,12 @@ class JobManager:
             if kind == "step":
                 self.state["step"] = event["name"]
             elif kind == "start":
+                # each pipeline phase restarts the progress bar
                 self.state["total"] = event["total"]
+                self.state["done"] = 0
+                self.state["current"] = ""
+                self.state["eta_seconds"] = None
+                self.state["phase"] = event.get("phase", "convert")
             elif kind == "progress":
                 self.state["done"] = event["index"]
                 self.state["current"] = event["source"]
@@ -117,6 +123,12 @@ class JobManager:
                 del self.state["events"][:-EVENT_RING]
             elif kind == "failed":
                 self.state["failures"].append(event)
+            elif kind == "verify_failed":
+                self.state["failures"].append({
+                    "source": event["source"], "code": "VERIFY",
+                    "name": "VERIFY_FAILED",
+                    "diagnosis": "Conversion check failed: %s — the"
+                                 " original was kept." % event["note"]})
             elif kind == "summary":
                 self.state["summary"] = event
                 self.state["step"] = "done"

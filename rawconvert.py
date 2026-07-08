@@ -503,7 +503,8 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
         print("Note: --batch-size applies to DNG only; ignored for %s." % fmt)
     if progress_json:
         if not dry_run:
-            _emit({"type": "start", "total": len(files), "format": fmt})
+            _emit({"type": "start", "total": len(files), "format": fmt,
+                   "phase": "convert"})
     elif not quiet and not dry_run:
         print("%d RAW files to process under %s" % (len(files), root),
               flush=True)
@@ -705,34 +706,60 @@ def _check_output(src: Path, dst: Path, fmt: str):
     return True, ""
 
 
-def cmd_verify(root: Path, fmt: str) -> dict:
-    """Validate every converted output for fmt; mark rows verified/failed."""
+VERIFY_HEARTBEAT_EVERY = 200  # human-mode progress line interval
+
+
+def cmd_verify(root: Path, fmt: str, progress_json: bool = False) -> dict:
+    """Validate every converted output for fmt; mark rows verified/failed.
+
+    Verification probes image dimensions with sips per file, so big folders
+    take real time — progress is reported in both output modes.
+    """
     manifest = Manifest(root)
     manifest.load()
     counts = {"verified": 0, "failed": 0}
-    for row in manifest.rows():
-        if row["format"] != fmt or row["status"] not in ("converted",
-                                                         "verified"):
-            continue
-        src = root / row["source_relpath"]
+    rows = [row for row in manifest.rows()
+            if row["format"] == fmt
+            and row["status"] in ("converted", "verified")]
+    started = time.monotonic()
+    if progress_json:
+        _emit({"type": "start", "total": len(rows), "format": fmt,
+               "phase": "verify"})
+    for index, row in enumerate(rows, 1):
+        rel = row["source_relpath"]
+        src = root / rel
         dst = resolve_output(root, row)
         ok, note = _check_output(src, dst, fmt)
         if ok:
-            manifest.set(row["source_relpath"], fmt, status="verified",
-                         note="")
+            manifest.set(rel, fmt, status="verified", note="")
             counts["verified"] += 1
         else:
-            manifest.set(row["source_relpath"], fmt, status="failed",
-                         note=note)
+            manifest.set(rel, fmt, status="failed", note=note)
             counts["failed"] += 1
-            print("VERIFY FAILED: %s (%s): %s"
-                  % (row["source_relpath"], fmt, note))
+            if progress_json:
+                _emit({"type": "verify_failed", "source": rel,
+                       "note": note})
+            else:
+                print("VERIFY FAILED: %s (%s): %s" % (rel, fmt, note))
+        if progress_json:
+            _emit({"type": "progress", "index": index, "total": len(rows),
+                   "source": rel, "phase": "verify",
+                   "eta_seconds": int((time.monotonic() - started) / index
+                                      * (len(rows) - index))})
+        elif index % VERIFY_HEARTBEAT_EVERY == 0 and index < len(rows):
+            print("verified %d/%d  (ETA %s)"
+                  % (index, len(rows),
+                     _eta(time.monotonic() - started, index,
+                          len(rows) - index)), flush=True)
     manifest.save()
-    print("verify --to %s: %d verified, %d failed"
-          % (fmt, counts["verified"], counts["failed"]))
-    if counts["failed"]:
-        print("Failed files stay protected: cleanup will not touch their"
-              " originals.")
+    if progress_json:
+        _emit(dict(counts, type="verify_summary"))
+    else:
+        print("verify --to %s: %d verified, %d failed"
+              % (fmt, counts["verified"], counts["failed"]))
+        if counts["failed"]:
+            print("Failed files stay protected: cleanup will not touch"
+                  " their originals.")
     return counts
 
 
@@ -774,7 +801,8 @@ def _stage(path: Path, dest: Path, dry_run: bool) -> None:
     os.replace(str(path), str(dest))
 
 
-def cmd_cleanup(root: Path, keep: str, dry_run: bool = False) -> dict:
+def cmd_cleanup(root: Path, keep: str, dry_run: bool = False,
+                progress_json: bool = False) -> dict:
     """Stage verified originals + rejected-format outputs into the trash dir.
 
     Only sources whose `keep`-format output is VERIFIED are staged. Nothing is
@@ -785,7 +813,14 @@ def cmd_cleanup(root: Path, keep: str, dry_run: bool = False) -> dict:
     trash = root / TRASH_DIRNAME
     counts = {"originals_staged": 0, "rejected_staged": 0}
 
-    for row in manifest.rows():
+    candidates = [row for row in manifest.rows()
+                  if (row["format"] == keep and row["status"] == "verified")
+                  or (row["format"] != keep
+                      and row["status"] in ("converted", "verified"))]
+    if progress_json:
+        _emit({"type": "start", "total": len(candidates), "phase": "cleanup"})
+
+    for index, row in enumerate(candidates, 1):
         rel = row["source_relpath"]
         if row["format"] == keep and row["status"] == "verified":
             src = root / rel
@@ -807,16 +842,24 @@ def cmd_cleanup(root: Path, keep: str, dry_run: bool = False) -> dict:
                 counts["rejected_staged"] += 1
                 if not dry_run:
                     manifest.set(rel, row["format"], status="cleaned")
+        if progress_json:
+            _emit({"type": "progress", "index": index,
+                   "total": len(candidates), "source": rel,
+                   "phase": "cleanup"})
 
     if not dry_run:
         manifest.save()
-    print("cleanup --keep %s: %d originals and %d rejected outputs staged"
-          " in %s%s" % (keep, counts["originals_staged"],
-                        counts["rejected_staged"], trash,
-                        " (dry run)" if dry_run else ""))
-    if not dry_run and (counts["originals_staged"]
-                        or counts["rejected_staged"]):
-        print("Review that folder, then delete it yourself when satisfied.")
+    if progress_json:
+        _emit(dict(counts, type="cleanup_summary"))
+    else:
+        print("cleanup --keep %s: %d originals and %d rejected outputs"
+              " staged in %s%s" % (keep, counts["originals_staged"],
+                                   counts["rejected_staged"], trash,
+                                   " (dry run)" if dry_run else ""))
+        if not dry_run and (counts["originals_staged"]
+                            or counts["rejected_staged"]):
+            print("Review that folder, then delete it yourself when"
+                  " satisfied.")
     return counts
 
 
@@ -849,9 +892,9 @@ def cmd_process(root: Path, fmt: str, quality: int = 90, sample=None,
         return 0
     if progress_json:
         _emit({"type": "step", "name": "verify"})
-        vcounts, _ = _swallow_stdout(cmd_verify, root, fmt)
+        vcounts = cmd_verify(root, fmt, progress_json=True)
         _emit({"type": "step", "name": "cleanup"})
-        scounts, _ = _swallow_stdout(cmd_cleanup, root, fmt)
+        scounts = cmd_cleanup(root, fmt, progress_json=True)
     else:
         print("\n== Step 3/4: verify ==")
         vcounts = cmd_verify(root, fmt)
@@ -877,16 +920,6 @@ def cmd_process(root: Path, fmt: str, quality: int = 90, sample=None,
         print("Spot-check %s and delete it yourself when satisfied."
               % (root / TRASH_DIRNAME))
     return 1 if failed else 0
-
-
-def _swallow_stdout(func, *args, **kwargs):
-    """Run func with its stdout captured; returns (result, output_text)."""
-    import contextlib
-    import io
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        result = func(*args, **kwargs)
-    return result, buf.getvalue()
 
 
 def open_in_preview(paths) -> None:
@@ -1114,6 +1147,8 @@ def main(argv=None) -> int:
     p.add_argument("folder", type=_folder)
     p.add_argument("--to", choices=sorted(FORMATS), default="dng",
                    dest="fmt", help="format to verify (default: dng)")
+    p.add_argument("--progress-json", action="store_true",
+                   help="machine-readable JSON output (used by the GUI)")
 
     p = sub.add_parser("status", help="per-format size comparison")
     p.add_argument("folder", type=_folder)
@@ -1156,7 +1191,8 @@ def main(argv=None) -> int:
                               progress_json=args.progress_json)
         return 0 if results else 1
     if args.command == "verify":
-        counts = cmd_verify(args.folder, args.fmt)
+        counts = cmd_verify(args.folder, args.fmt,
+                            progress_json=args.progress_json)
         return 1 if counts["failed"] else 0
     if args.command == "status":
         return cmd_status(args.folder)
