@@ -22,7 +22,7 @@ import tempfile
 import time
 from pathlib import Path
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 RAW_EXTS = {".cr2", ".cr3"}
 FORMATS = {"jpeg": ".jpg", "heic": ".heic", "dng": ".dng"}
@@ -391,10 +391,22 @@ FAILURE_CODES = {
               " skipped automatically."]),
     "RC06": ("PERMISSION_DENIED",
              "macOS blocked access to the file or destination folder.",
-             ["Check System Settings > Privacy & Security > Files and"
+             ["Select the file in Finder and Get Info — if 'Locked' is"
+              " ticked, untick it (or run `chflags -R nouchg <folder>`).",
+              "Check System Settings > Privacy & Security > Files and"
               " Folders (or Full Disk Access) for your terminal app.",
               "Check the drive isn't mounted read-only: `mount | grep"
               " Volumes`."]),
+    "RC07": ("ILLEGAL_NAME",
+             "A folder or file name contains characters this drive's format"
+             " can't reproduce — typically a '/' typed in Finder, which is"
+             " stored as ':' on disk.",
+             ["RawConvert stages such files under an adjusted name (':'"
+              " becomes '_') automatically — re-run the same command.",
+              "For a permanent fix, rename the folder in Finder to avoid"
+              " '/' characters, then re-run.",
+              "FAT/exFAT drives (most USB sticks) are the usual culprits;"
+              " Mac-formatted (APFS) drives handle these names fine."]),
     "RC99": ("UNKNOWN",
              "Unrecognized failure — the raw engine output is preserved"
              " below.",
@@ -404,6 +416,26 @@ FAILURE_CODES = {
               "If several files fail the same way, re-run with --sample on"
               " a copy and report the log."]),
 }
+
+
+def _has_awkward_name(path: Path) -> bool:
+    """True if any path component can't be reproduced on FAT-like drives:
+    a ':' (Finder-typed '/'), or a trailing space/dot."""
+    for part in Path(str(path)).parts:
+        if part in ("/", path.anchor):
+            continue
+        if ":" in part or part != part.rstrip(" ."):
+            return True
+    return False
+
+
+def _sanitize_rel(rel: str) -> str:
+    """Rewrite a relative path so every component is FAT-safe."""
+    safe = []
+    for part in rel.split("/"):
+        part = part.replace(":", "_").rstrip(" .")
+        safe.append(part or "_")
+    return "/".join(safe)
 
 
 def classify_failure(src: Path, src_bytes: int, message: str) -> dict:
@@ -417,7 +449,11 @@ def classify_failure(src: Path, src_bytes: int, message: str) -> dict:
         code = "RC04"
     elif "no space left" in text or "disk full" in text:
         code = "RC05"
-    elif "permission denied" in text or "read-only" in text:
+    elif (("operation not permitted" in text or "invalid argument" in text)
+          and _has_awkward_name(src)):
+        code = "RC07"
+    elif ("permission denied" in text or "read-only" in text
+          or "operation not permitted" in text):
         code = "RC06"
     elif "cannot extract image" in text or "unable to decode" in text:
         code = "RC03"
@@ -429,7 +465,7 @@ def classify_failure(src: Path, src_bytes: int, message: str) -> dict:
 
 
 def log_failure(root: Path, rel: str, src: Path, fmt: str, engine: str,
-                message: str) -> dict:
+                message: str, operation: str = "convert") -> dict:
     """Append a classified failure to the error log; returns the class info."""
     try:
         src_bytes = src.stat().st_size
@@ -440,7 +476,8 @@ def log_failure(root: Path, rel: str, src: Path, fmt: str, engine: str,
     lines = [
         "[%s] %s %s" % (timestamp, info["code"], info["name"]),
         "  file: %s (%s)" % (rel, human_size(src_bytes)),
-        "  operation: convert --to %s (engine: %s)" % (fmt, engine or "n/a"),
+        "  operation: %s (--to %s%s)"
+        % (operation, fmt, ", engine: " + engine if engine else ""),
         "  engine error: %s" % message.replace("\n", "\n      "),
         "  diagnosis: %s" % info["diagnosis"],
         "  debug steps:",
@@ -450,6 +487,10 @@ def log_failure(root: Path, rel: str, src: Path, fmt: str, engine: str,
     with open(root / ERROR_LOG_NAME, "a") as f:
         f.write("\n".join(lines) + "\n\n")
     return info
+
+
+def _make_parent(dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _root_field(out_base: Path, root: Path) -> str:
@@ -563,7 +604,14 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
         if not batch:
             return
         staging = batch[0][3].parent / DNG_STAGING_DIRNAME
-        staging.mkdir(exist_ok=True)
+        try:
+            staging.mkdir(exist_ok=True)
+        except OSError as exc:
+            for index, src, rel, dst, out_rel in batch:
+                record_failure(index, src, rel, out_rel,
+                               "dngconverter-batch", str(exc))
+            batch.clear()
+            return
         err = dng_convert_batch([entry[1] for entry in batch], staging)
         for index, src, rel, dst, out_rel in batch:
             produced = staging / (src.stem + ".dng")
@@ -613,7 +661,11 @@ def cmd_convert(root: Path, fmt: str, quality: int = 90, sample=None,
             counts["converted"] += 1
             continue
 
-        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _make_parent(dst)
+        except OSError as exc:
+            record_failure(index, src, rel, out_rel, "", str(exc))
+            continue
 
         if use_batch:
             if batch and batch[0][3].parent != dst.parent:
@@ -793,12 +845,32 @@ def cmd_status(root: Path) -> int:
     return 0
 
 
-def _stage(path: Path, dest: Path, dry_run: bool) -> None:
+def _stage(path: Path, base: Path, rel: str, dry_run: bool) -> Path:
+    """Move path to base/rel in the trash. Falls back to a FAT-safe name
+    when the drive rejects the mirrored one (e.g. ':' from a Finder-typed
+    '/' in a folder name). Returns the destination actually used."""
+    dest = base / rel
     if dry_run:
         print("DRY-RUN: would move %s -> %s" % (path, dest))
-        return
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(str(path), str(dest))
+        return dest
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(str(path), str(dest))
+        return dest
+    except OSError:
+        safe_rel = _sanitize_rel(rel)
+        if safe_rel == rel:
+            raise
+        candidate = base / safe_rel
+        suffix = 1
+        while candidate.exists():
+            suffix += 1
+            candidate = (base / safe_rel).with_name(
+                "%s %d%s" % (Path(safe_rel).stem, suffix,
+                             Path(safe_rel).suffix))
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(str(path), str(candidate))
+        return candidate
 
 
 def cmd_cleanup(root: Path, keep: str, dry_run: bool = False,
@@ -811,7 +883,7 @@ def cmd_cleanup(root: Path, keep: str, dry_run: bool = False,
     manifest = Manifest(root)
     manifest.load()
     trash = root / TRASH_DIRNAME
-    counts = {"originals_staged": 0, "rejected_staged": 0}
+    counts = {"originals_staged": 0, "rejected_staged": 0, "failed": 0}
 
     candidates = [row for row in manifest.rows()
                   if (row["format"] == keep and row["status"] == "verified")
@@ -820,15 +892,38 @@ def cmd_cleanup(root: Path, keep: str, dry_run: bool = False,
     if progress_json:
         _emit({"type": "start", "total": len(candidates), "phase": "cleanup"})
 
+    def stage_failed(rel, path, fmt, exc):
+        # one blocked file never aborts the batch; status stays as-is so a
+        # re-run retries it once the user fixes the cause
+        counts["failed"] += 1
+        info = log_failure(root, rel, path, fmt, "", str(exc),
+                           operation="cleanup")
+        manifest.set(rel, fmt,
+                     note=("[%s] cleanup failed: %s"
+                           % (info["code"], str(exc)))[:300])
+        if progress_json:
+            _emit({"type": "failed", "source": rel, "code": info["code"],
+                   "name": info["name"], "diagnosis": info["diagnosis"]})
+        else:
+            print("FAILED [%s %s]: %s — %s"
+                  % (info["code"], info["name"], rel, info["diagnosis"]))
+
     for index, row in enumerate(candidates, 1):
         rel = row["source_relpath"]
         if row["format"] == keep and row["status"] == "verified":
             src = root / rel
             if src.exists():
-                _stage(src, trash / "originals" / rel, dry_run)
-                counts["originals_staged"] += 1
-                if not dry_run:
-                    manifest.set(rel, keep, status="cleaned")
+                try:
+                    used = _stage(src, trash / "originals", rel, dry_run)
+                    counts["originals_staged"] += 1
+                    if not dry_run:
+                        note = ("" if str(used) == str(trash / "originals" /
+                                                       rel)
+                                else "staged as %s (name adjusted for this"
+                                     " drive's format)" % used)
+                        manifest.set(rel, keep, status="cleaned", note=note)
+                except OSError as exc:
+                    stage_failed(rel, src, keep, exc)
         elif (row["format"] != keep
               and row["status"] in ("converted", "verified")):
             out = resolve_output(root, row)
@@ -837,11 +932,14 @@ def cmd_cleanup(root: Path, keep: str, dry_run: bool = False,
                 # instant and never crosses volumes
                 out_trash = (Path(row["output_root"]) if row["output_root"]
                              else root) / TRASH_DIRNAME
-                _stage(out, out_trash / "rejected" / row["output_relpath"],
-                       dry_run)
-                counts["rejected_staged"] += 1
-                if not dry_run:
-                    manifest.set(rel, row["format"], status="cleaned")
+                try:
+                    _stage(out, out_trash / "rejected",
+                           row["output_relpath"], dry_run)
+                    counts["rejected_staged"] += 1
+                    if not dry_run:
+                        manifest.set(rel, row["format"], status="cleaned")
+                except OSError as exc:
+                    stage_failed(rel, out, row["format"], exc)
         if progress_json:
             _emit({"type": "progress", "index": index,
                    "total": len(candidates), "source": rel,
@@ -856,6 +954,9 @@ def cmd_cleanup(root: Path, keep: str, dry_run: bool = False,
               " staged in %s%s" % (keep, counts["originals_staged"],
                                    counts["rejected_staged"], trash,
                                    " (dry run)" if dry_run else ""))
+        if counts["failed"]:
+            print("%d files could not be staged — details and fixes in %s"
+                  % (counts["failed"], root / ERROR_LOG_NAME))
         if not dry_run and (counts["originals_staged"]
                             or counts["rejected_staged"]):
             print("Review that folder, then delete it yourself when"
